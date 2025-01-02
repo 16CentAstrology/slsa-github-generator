@@ -30,6 +30,7 @@ project simply generates provenance as a separate step in an existing workflow.
   - [Provenance Example](#provenance-example)
 - [Integration With Other Build Systems](#integration-with-other-build-systems)
   - [Ko](#ko)
+  - [GoReleaser](#goreleaser)
 - [Provenance for matrix strategy builds](#provenance-for-matrix-strategy-builds)
 - [Verification](#verification)
   - [slsa-verifier](#slsa-verifier)
@@ -72,7 +73,7 @@ provenance:
     id-token: write # for creating OIDC tokens for signing.
     packages: write # for uploading attestations.
   if: startsWith(github.ref, 'refs/tags/')
-  uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v1.4.0
+  uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.0.0
   with:
     image: ${{ needs.build.outputs.image }}
     digest: ${{ needs.build.outputs.digest }}
@@ -143,7 +144,7 @@ jobs:
       id-token: write # for creating OIDC tokens for signing.
       packages: write # for uploading attestations.
     if: startsWith(github.ref, 'refs/tags/')
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v1.4.0
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.0.0
     with:
       image: ${{ needs.build.outputs.image }}
       digest: ${{ needs.build.outputs.digest }}
@@ -203,21 +204,28 @@ The [container workflow](https://github.com/slsa-framework/slsa-github-generator
 
 Inputs:
 
-| Name                 | Required | Default | Description                                                                                                                                                                                                                     |
-| -------------------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `image`              | yes      |         | The OCI image name. This must not include a tag or digest.                                                                                                                                                                      |
-| `digest`             | yes      |         | The OCI image digest. The image digest of the form '<algorithm>:<digest>' (e.g. 'sha256:abcdef...')                                                                                                                             |
-| `registry-username`  | no       |         | Username to log in the container registry. Either `registry-username` input or `registry-username` secret is required.                                                                                                          |
-| `compile-generator`  | false    | false   | Whether to build the generator from source. This increases build time by ~2m.                                                                                                                                                   |
-| `private-repository` | no       | false   | Set to true to opt-in to posting to the public transparency log. Will generate an error if false for private repositories. This input has no effect for public repositories. See [Private Repositories](#private-repositories). |
-| `continue-on-error`  | no       | false   | Set to true to ignore errors. This option is useful if you won't want a failure to fail your entire workflow.                                                                                                                   |
+| Name                             | Description                                                                                                                                                                                                                                                                             |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `image`                          | **(Required)** The OCI image name. This must not include a tag or digest.                                                                                                                                                                                                               |
+| `digest`                         | **(Required)** The OCI image digest. The image digest of the form '<algorithm>:<digest>' (e.g. 'sha256:abcdef...')                                                                                                                                                                      |
+| `registry-username`              | Username to log in the container registry. Either `registry-username` input or `registry-username` secret is required.                                                                                                                                                                  |
+| `compile-generator`              | Whether to build the generator from source. This increases build time by ~2m.<br>Default: `false`.                                                                                                                                                                                      |
+| `private-repository`             | Set to true to opt-in to posting to the public transparency log. Will generate an error if false for private repositories. This input has no effect for public repositories. See [Private Repositories](#private-repositories).<br>Default: `false`                                     |
+| `continue-on-error`              | Set to true to ignore errors. This option is useful if you won't want a failure to fail your entire workflow.<br>Default: `false`                                                                                                                                                       |
+| `gcp-workload-identity-provider` | The full identifier of the Workload Identity Provider, including the project number, pool name, and provider name. If provided, this must be the full identifier which includes all parts:<br>`projects/123456789/locations/global/workloadIdentityPools/my-pool/providers/my-provider` |
+| `gcp-service-account`            | Email address or unique identifier of the Google Cloud service account for which to generate credentials. For example:<br>`my-service-account@my-project.iam.gserviceaccount.com`                                                                                                       |
+| `provenance-registry-username`   | Username when publishing to provenance registry (option 'provenance-registry') instead of image registry. Either `provenance-registry-username` input or `provenance-registry-username` secret is required.                                                                             |
+| `provenance-registry`            | If set, provenance is pushed to this registry instead of image registry. (e.g. `gcr.io/my-new-repo`)                                                                                                                                                                                    |
 
 Secrets:
 
-| Name                | Required | Description                                                                                                            |
-| ------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `registry-username` | no       | Username to log in the container registry. Either `registry-username` input or `registry-username` secret is required. |
-| `registry-password` | yes      | Password to log in the container registry.                                                                             |
+| Name                           | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `image`                        | The OCI image name. This must not include a tag or digest. Either `image` input or `image` secret is **required**. Secret `image` value takes precedence on `image` input value. Should be used in scenarios when the image name contains secret values, and therefore can't be provided directly. Use case - an undisclosed private registry use.                                                                                                                                                                                                                                |
+| `registry-username`            | Username to log in the container registry. Either `registry-username` input or `registry-username` secret is required. This should only be used for high entropy values such as AWS Access Key as described [here](https://github.com/docker/login-action#aws-elastic-container-registry-ecr). Normal username values could match other input values and cause them to be ignored by GitHub Actions and causing your build to fail. In those cases, use the `registry-username` input instead.                                                                                    |
+| `registry-password`            | **(Required)** Password to log in the container registry.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `provenance-registry-username` | Username when publishing to provenance registry (option 'provenance-registry') instead of image registry. Either `provenance-registry-username` input or `provenance-registry-username` secret is required. This should only be used for high entropy values such as AWS Access Key as described [here](https://github.com/docker/login-action#aws-elastic-container-registry-ecr). Normal username values could match other input values and cause them to be ignored by GitHub Actions and causing your build to fail. In those cases, use the registry-username input instead. |
+| `provenance-registry-password` | Password when publishing to provenance registry instead of image registry.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 ### Workflow Outputs
 
@@ -316,129 +324,133 @@ This section explains how to generate non-forgeable SLSA provenance with existin
 
 1. Declare an `outputs` for the build job:
 
-```yaml
-jobs:
-  build:
-    outputs:
-      image: ${{ steps.build.outputs.image }}
-      digest: ${{ steps.build.outputs.digest }}
-```
+   ```yaml
+   jobs:
+     build:
+       outputs:
+         image: ${{ steps.build.outputs.image }}
+         digest: ${{ steps.build.outputs.digest }}
+   ```
 
 2. Add an `id: build` field to your ko step. Update the step to output the image
    and digest.
 
-```yaml
-steps:
-  [...]
-  - name: Run ko
-    id: build
-    env:
-      KO_DOCKER_REPO: "${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}"
-      KO_USER: ${{ github.actor }}
-      KO_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-      GIT_REF: ${{ github.ref }}
-    run: |
-      # get tag name without tags/refs/ prefix.
-      tag=$(echo ${GIT_REF} | cut -d'/' -f3)
+   ```yaml
+   steps:
+     [...]
+     - name: Run ko
+       id: build
+       env:
+         KO_DOCKER_REPO: "${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}"
+         KO_USER: ${{ github.actor }}
+         KO_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+         GIT_REF: ${{ github.ref }}
+       run: |
+         # get tag name without tags/refs/ prefix.
+         tag=$(echo ${GIT_REF} | cut -d'/' -f3)
 
-      # Log into regisry
-      echo "${KO_PASSWORD}" | ko login ghcr.io --username "$KO_USER" --password-stdin
+         # Log into regisry
+         echo "${KO_PASSWORD}" | ko login ghcr.io --username "$KO_USER" --password-stdin
 
-      # Build & push the image. Save the image name.
-      image_and_digest=$(ko build --tags="${tag}" .)
+         # Build & push the image. Save the image name.
+         ko build --bare --tags="${tag}" --image-refs .digest
 
-      # Output the image name and digest so we can generate provenance.
-      image=$(echo "${image_and_digest}" | cut -d':' -f1)
-      digest=$(echo "${image_and_digest}" | cut -d'@' -f2)
-      echo "image=$image" >> "$GITHUB_OUTPUT"
-      echo "digest=$digest" >> "$GITHUB_OUTPUT"
-```
+         # Output the image name and digest so we can generate provenance.
+         image=$(cat .digest | cut -d'@' -f1 | cut -d':' -f1)
+         digest=$(cat .digest| cut -d'@' -f2)
+         echo "image=$image" >> "$GITHUB_OUTPUT"
+         echo "digest=$digest" >> "$GITHUB_OUTPUT"
+   ```
 
 3. Call the generic container workflow to generate provenance by declaring the job below:
 
-```yaml
-provenance:
-  needs: [build]
-  permissions:
-    actions: read
-    id-token: write
-    # contents: read
-    packages: write
-  if: startsWith(github.ref, 'refs/tags/')
-  uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v1.4.0
-  with:
-    image: ${{ needs.build.outputs.image }}
-    digest: ${{ needs.build.outputs.digest }}
-    registry-username: ${{ github.actor }}
-    compile-generator: true
-  secrets:
-    registry-password: ${{ secrets.GITHUB_TOKEN }}
-```
+   ```yaml
+   provenance:
+     needs: [build]
+     permissions:
+       actions: read
+       id-token: write
+       # contents: read
+       packages: write
+     if: startsWith(github.ref, 'refs/tags/')
+     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.0.0
+     with:
+       image: ${{ needs.build.outputs.image }}
+       digest: ${{ needs.build.outputs.digest }}
+       registry-username: ${{ github.actor }}
+       compile-generator: true
+     secrets:
+       registry-password: ${{ secrets.GITHUB_TOKEN }}
+   ```
 
-All together, it will look as the following:
+   All together, it will look as the following:
 
-```yaml
-jobs:
-  build:
-    permissions:
-      contents: read
-      packages: write
-    outputs:
-      image: ${{ steps.build.outputs.image }}
-      digest: ${{ steps.build.outputs.digest }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout the repository
-        uses: actions/checkout@2541b1294d2704b0964813337f33b291d3f8596b # v2.3.4
+   ```yaml
+   jobs:
+     build:
+       permissions:
+         contents: read
+         packages: write
+       outputs:
+         image: ${{ steps.build.outputs.image }}
+         digest: ${{ steps.build.outputs.digest }}
+       runs-on: ubuntu-latest
+       steps:
+         - name: Checkout the repository
+           uses: actions/checkout@2541b1294d2704b0964813337f33b291d3f8596b # v2.3.4
 
-      - uses: actions/setup-go@v3.3.0
-        with:
-          go-version: 1.19
+         - uses: actions/setup-go@v5.0.1
+           with:
+             go-version: 1.19
 
-      - name: Set up ko
-        uses: imjasonh/setup-ko@v0.6
+         - name: Set up ko
+           uses: imjasonh/setup-ko@v0.6
 
-      - name: Run ko
-        id: build
-        env:
-          KO_DOCKER_REPO: "${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}"
-          KO_USER: ${{ github.actor }}
-          KO_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-          GIT_REF: ${{ github.ref }}
-        run: |
-          # get tag name without tags/refs/ prefix.
-          tag=$(echo ${GIT_REF} | cut -d'/' -f3)
+         - name: Run ko
+           id: build
+           env:
+             KO_DOCKER_REPO: "${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}"
+             KO_USER: ${{ github.actor }}
+             KO_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+             GIT_REF: ${{ github.ref }}
+           run: |
+             # get tag name without tags/refs/ prefix.
+             tag=$(echo ${GIT_REF} | cut -d'/' -f3)
 
-          # Log into regisry
-          echo "${KO_PASSWORD}" | ko login ghcr.io --username "$KO_USER" --password-stdin
+             # Log into regisry
+             echo "${KO_PASSWORD}" | ko login ghcr.io --username "$KO_USER" --password-stdin
 
-          # Build & push the image. Save the image name.
-          image_and_digest=$(ko build --tags="${tag}" .)
+             # Build & push the image. Save the image name.
+             image_and_digest=$(ko build --tags="${tag}" .)
 
-          # Output the image name and digest so we can generate provenance.
-          image=$(echo "${image_and_digest}" | cut -d':' -f1)
-          digest=$(echo "${image_and_digest}" | cut -d'@' -f2)
-          echo "image=$image" >> "$GITHUB_OUTPUT"
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+             # Output the image name and digest so we can generate provenance.
+             image=$(echo "${image_and_digest}" | cut -d':' -f1)
+             digest=$(echo "${image_and_digest}" | cut -d'@' -f2)
+             echo "image=$image" >> "$GITHUB_OUTPUT"
+             echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-  # This step calls the generic workflow to generate provenance.
-  provenance:
-    needs: [build]
-    permissions:
-      actions: read
-      id-token: write
-      # contents: read
-      packages: write
-    if: startsWith(github.ref, 'refs/tags/')
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v1.4.0
-    with:
-      image: ${{ needs.build.outputs.image }}
-      digest: ${{ needs.build.outputs.digest }}
-      registry-username: ${{ github.actor }}
-      compile-generator: true
-    secrets:
-      registry-password: ${{ secrets.GITHUB_TOKEN }}
-```
+     # This step calls the generic workflow to generate provenance.
+     provenance:
+       needs: [build]
+       permissions:
+         actions: read
+         id-token: write
+         # contents: read
+         packages: write
+       if: startsWith(github.ref, 'refs/tags/')
+       uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.0.0
+       with:
+         image: ${{ needs.build.outputs.image }}
+         digest: ${{ needs.build.outputs.digest }}
+         registry-username: ${{ github.actor }}
+         compile-generator: true
+       secrets:
+         registry-password: ${{ secrets.GITHUB_TOKEN }}
+   ```
+
+### [GoReleaser](#goreleaser)
+
+Follow the great blog post of [goreleaser.com](https://goreleaser.com/blog/slsa-generation-for-your-artifacts).
 
 ## Provenance for matrix strategy builds
 
@@ -460,7 +472,7 @@ Verification of provenance attestations can be done via several different tools.
 
 Here is an example policy stored in `policy.cue`:
 
-```
+```text
 // The predicateType field must match this string
 predicateType: "https://slsa.dev/provenance/v0.2"
 
@@ -493,20 +505,22 @@ We can then use `cosign` to verify the attestation using the policy.
 ```shell
 COSIGN_EXPERIMENTAL=1 cosign verify-attestation \
   --type slsaprovenance \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github.com/slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@refs/tags/v[0-9]+.[0-9]+.[0-9]+$' \
   --policy policy.cue \
   ghcr.io/ianlewis/actions-test:v0.0.79
 ```
 
 This should result in output like the following:
 
-```
+```text
 will be validating against CUE policies: [policy.cue]
 
 Verification for ghcr.io/ianlewis/actions-test:v0.0.79 --
 The following checks were performed on each of these signatures:
   - The cosign claims were validated
   - Existence of the claims in the transparency log was verified offline
-  - Any certificates were verified against the Fulcio roots.
+  - The code-signing certificate was verified using trusted certificate authority certificates
 Certificate subject:  https://github.com/slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@refs/tags/v1.4.0
 Certificate issuer URL:  https://token.actions.githubusercontent.com
 GitHub Workflow Trigger: push

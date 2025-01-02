@@ -1,16 +1,29 @@
+// Copyright 2023 SLSA Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package github
 
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
-
-	"github.com/slsa-framework/slsa-github-generator/internal/errors"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -60,8 +73,8 @@ func TestNewOIDCClient(t *testing.T) {
 		if err == nil {
 			t.Fatalf("expected error")
 		}
-		if want, got := (&errURLError{}), err; !errors.As(got, &want) {
-			t.Fatalf("unexpected error, want: %#v, got: %#v", want, got)
+		if got, want := err, errURLError; !errors.Is(got, want) {
+			t.Fatalf("unexpected error, got: %#v, want: %#v", got, want)
 		}
 	})
 }
@@ -70,29 +83,29 @@ func TestToken(t *testing.T) {
 	now := time.Date(2022, 4, 14, 12, 24, 0, 0, time.UTC)
 
 	errClaimsFunc := func(got error) {
-		want := &errClaims{}
-		if !errors.As(got, &want) {
+		want := errClaims
+		if !errors.Is(got, want) {
 			t.Fatalf("unexpected error: %v", cmp.Diff(got, want, cmpopts.EquateErrors()))
 		}
 	}
 
 	errVerifyFunc := func(got error) {
-		want := &errVerify{}
-		if !errors.As(got, &want) {
+		want := errVerify
+		if !errors.Is(got, want) {
 			t.Fatalf("unexpected error: %v", cmp.Diff(got, want, cmpopts.EquateErrors()))
 		}
 	}
 
 	errTokenFunc := func(got error) {
-		want := &errToken{}
-		if !errors.As(got, &want) {
+		want := errToken
+		if !errors.Is(got, want) {
 			t.Fatalf("unexpected error: %v", cmp.Diff(got, want, cmpopts.EquateErrors()))
 		}
 	}
 
 	errRequestErrorFunc := func(got error) {
-		want := &errRequestError{}
-		if !errors.As(got, &want) {
+		want := errRequestError
+		if !errors.Is(got, want) {
 			t.Fatalf("unexpected error: %v", cmp.Diff(got, want, cmpopts.EquateErrors()))
 		}
 	}

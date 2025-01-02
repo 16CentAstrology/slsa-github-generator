@@ -23,8 +23,11 @@ package pkg
 // Docker image.
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -34,17 +37,32 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	intoto "github.com/in-toto/in-toto-golang/in_toto"
+	slsa1 "github.com/in-toto/in-toto-golang/in_toto/slsa_provenance/v1"
+
+	"github.com/slsa-framework/slsa-github-generator/internal/utils"
+)
+
+var (
+	// errGitCommitMismatch indicates that the repo is checked out at an unexpected commit hash.
+	errGitCommitMismatch = errors.New("commit mismatch")
+
+	// errGitFetch indicates an error when cloning a Git repo.
+	errGitFetch = errors.New("git fetch")
+
+	// errGitCheckout indicates an error when checking out a given commit hash.
+	errGitCheckout = errors.New("git checkout")
 )
 
 // DockerBuild represents a state in the process of building the artifacts
 // where the source repository is checked out and the config file is loaded and
 // parsed, and we are ready for running the `docker run` command.
 type DockerBuild struct {
-	BuildDefinition *BuildDefinition
-	BuildConfig     *BuildConfig
-	RepoInfo        *RepoCheckoutInfo
+	config      *DockerBuildConfig
+	buildConfig *BuildConfig
+	RepoInfo    *RepoCheckoutInfo
 }
 
 // RepoCheckoutInfo contains info about the location of a locally checked out
@@ -69,48 +87,48 @@ type Builder struct {
 
 // NewBuilderWithGitFetcher creates a new Builder that fetches the sources
 // from a Git repository.
-func NewBuilderWithGitFetcher(config DockerBuildConfig, forceCheckout bool) (*Builder, error) {
-	gc, err := newGitClient(&config, forceCheckout, 0 /* depth */)
+func NewBuilderWithGitFetcher(config *DockerBuildConfig) (*Builder, error) {
+	gc, err := newGitClient(config, 0 /* depth */)
 	if err != nil {
 		return nil, fmt.Errorf("could not create builder: %v", err)
 	}
 
 	return &Builder{
 		repoFetcher: gc,
-		config:      config,
+		config:      *config,
 	}, nil
 }
 
-// CreateBuildDefinition creates a BuildDefinition from the given DockerBuildConfig.
-func CreateBuildDefinition(config *DockerBuildConfig) *BuildDefinition {
-	artifacts := make(map[string]ArtifactReference)
-	artifacts[SourceKey] = sourceArtifact(config)
-	artifacts[BuilderImageKey] = builderImage(config)
-
-	ep := ParameterCollection{
-		Artifacts: artifacts,
-		Values:    map[string]string{ConfigFileKey: config.BuildConfigPath},
+// CreateBuildDefinition creates a BuildDefinition from the DockerBuildConfig
+// and BuildConfig in this DockerBuild.
+func (db *DockerBuild) CreateBuildDefinition() *slsa1.ProvenanceBuildDefinition {
+	ep := ContainerBasedExternalParameters{
+		Source:       sourceArtifact(db.config),
+		BuilderImage: builderImage(db.config),
+		ConfigPath:   db.config.BuildConfigPath,
+		Config:       *db.buildConfig,
 	}
 
-	// Currently we don't have any SystemParameters or ResolvedDependencies.
-	// So these fields are left empty.
-	return &BuildDefinition{
-		BuildType:          DockerBasedBuildType,
+	// Currently we don't have any SystemParameters, so this fields is left empty.
+	return &slsa1.ProvenanceBuildDefinition{
+		BuildType:          ContainerBasedBuildType,
 		ExternalParameters: ep,
+		// The source repository is also added as a resolved dependency.
+		ResolvedDependencies: []slsa1.ResourceDescriptor{sourceArtifact(db.config)},
 	}
 }
 
-// sourceArtifact returns the source repo and its digest as an instance of ArtifactReference.
-func sourceArtifact(config *DockerBuildConfig) ArtifactReference {
-	return ArtifactReference{
+// sourceArtifact returns the source repo and its digest as an instance of ResourceDescriptor.
+func sourceArtifact(config *DockerBuildConfig) slsa1.ResourceDescriptor {
+	return slsa1.ResourceDescriptor{
 		URI:    config.SourceRepo,
 		Digest: config.SourceDigest.ToMap(),
 	}
 }
 
-// builderImage returns the builder image as an instance of ArtifactReference.
-func builderImage(config *DockerBuildConfig) ArtifactReference {
-	return ArtifactReference{
+// builderImage returns the builder image as an instance of ResourceDescriptor.
+func builderImage(config *DockerBuildConfig) slsa1.ResourceDescriptor {
+	return slsa1.ResourceDescriptor{
 		URI:    config.BuilderImage.ToString(),
 		Digest: config.BuilderImage.Digest.ToMap(),
 	}
@@ -134,25 +152,25 @@ func (b *Builder) SetUpBuildState() (*DockerBuild, error) {
 
 	// 3. Check that the ArtifactPath pattern does not match any existing files,
 	// so that we don't accidentally generate provenances for the wrong files.
-	if err := checkExistingFiles(bc.ArtifactPath); err != nil {
+	if err := CheckExistingFiles(bc.ArtifactPath); err != nil {
 		return nil, err
 	}
 
 	db := &DockerBuild{
-		BuildDefinition: CreateBuildDefinition(&b.config),
-		BuildConfig:     bc,
-		RepoInfo:        repoInfo,
+		config:      &b.config,
+		buildConfig: bc,
+		RepoInfo:    repoInfo,
 	}
 	return db, nil
 }
 
 // BuildArtifacts builds the artifacts based on the user-provided inputs, and
 // returns the names and SHA256 digests of the generated artifacts.
-func (db *DockerBuild) BuildArtifacts() ([]intoto.Subject, error) {
+func (db *DockerBuild) BuildArtifacts(outputFolder string) ([]intoto.Subject, error) {
 	if err := runDockerRun(db); err != nil {
 		return nil, fmt.Errorf("running `docker run` failed: %v", err)
 	}
-	return inspectArtifacts(db.BuildConfig.ArtifactPath)
+	return inspectAndWriteArtifacts(db.buildConfig.ArtifactPath, outputFolder, db.RepoInfo.RepoRoot)
 }
 
 func runDockerRun(db *DockerBuild) error {
@@ -170,11 +188,17 @@ func runDockerRun(db *DockerBuild) error {
 		"--rm",
 	}
 
+	buildDef := db.CreateBuildDefinition()
+	containerEp, ok := buildDef.ExternalParameters.(ContainerBasedExternalParameters)
+	if !ok {
+		return fmt.Errorf("expected container-based external parameters")
+	}
+
 	var args []string
 	args = append(args, "run")
 	args = append(args, defaultDockerRunFlags...)
-	args = append(args, db.BuildDefinition.ExternalParameters.Artifacts[BuilderImageKey].URI)
-	args = append(args, db.BuildConfig.Command...)
+	args = append(args, containerEp.BuilderImage.URI)
+	args = append(args, db.buildConfig.Command...)
 	cmd := exec.Command("docker", args...)
 
 	log.Printf("Running command: %q.", cmd.String())
@@ -192,7 +216,7 @@ func runDockerRun(db *DockerBuild) error {
 		return fmt.Errorf("couldn't start the 'git checkout' command: %v", err)
 	}
 
-	files, err := saveToTempFile(stdout, stderr)
+	files, err := saveToTempFile(db.config.Verbose, stdout, stderr)
 	if err != nil {
 		return fmt.Errorf("cannot save logs and errs to file: %v", err)
 	}
@@ -209,15 +233,17 @@ func runDockerRun(db *DockerBuild) error {
 // Git repository.
 type GitClient struct {
 	sourceRepo    *string
+	sourceRef     *string
 	sourceDigest  *Digest
 	checkoutInfo  *RepoCheckoutInfo
 	logFiles      []string
 	errFiles      []string
 	forceCheckout bool
+	verbose       bool
 	depth         int
 }
 
-func newGitClient(config *DockerBuildConfig, forceCheckout bool, depth int) (*GitClient, error) {
+func newGitClient(config *DockerBuildConfig, depth int) (*GitClient, error) {
 	repo := config.SourceRepo
 	parsed, err := url.Parse(repo)
 	if err != nil {
@@ -235,12 +261,28 @@ func newGitClient(config *DockerBuildConfig, forceCheckout bool, depth int) (*Gi
 		return nil, fmt.Errorf("unsupported scheme: %v", parsed.Scheme)
 	}
 
+	// Retrieve the ref if a tag is added to the repository.
+	var sourceRef *string
+	refParts := strings.Split(repo, "@")
+	switch len(refParts) {
+	case 2:
+		// A source reference was provided.
+		sourceRef = &refParts[1]
+		repo = strings.TrimSuffix(repo, "@"+refParts[1])
+	case 1:
+		// No source reference was provided.
+	default:
+		return nil, fmt.Errorf("invalid source repository format: %s", repo)
+	}
+
 	return &GitClient{
 		sourceRepo:    &repo,
+		sourceRef:     sourceRef,
 		sourceDigest:  &config.SourceDigest,
-		forceCheckout: forceCheckout,
+		forceCheckout: config.ForceCheckout,
 		depth:         depth,
 		checkoutInfo:  &RepoCheckoutInfo{},
+		verbose:       config.Verbose,
 	}, nil
 }
 
@@ -268,7 +310,7 @@ func (c *GitClient) verifyOrFetchRepo() error {
 	if c.sourceDigest.Alg != "sha1" {
 		return fmt.Errorf("git commit digest must be a sha1 digest")
 	}
-	repoIsCheckedOut, err := c.verifyCommit()
+	repoIsCheckedOut, err := c.verifyRefAndCommit()
 	if err != nil && !c.forceCheckout {
 		return err
 	}
@@ -280,20 +322,31 @@ func (c *GitClient) verifyOrFetchRepo() error {
 	return nil
 }
 
-// verifyCommit checks that the current working directory is the root of a Git
-// repository at the given commit hash. Returns an error if the working
-// directory is a Git repository at a different commit.
-func (c *GitClient) verifyCommit() (bool, error) {
-	cmd := exec.Command("git", "rev-parse", "--verify", "HEAD")
-	lastCommitIDBytes, err := cmd.Output()
-	if err != nil {
-		// The current working directory is not a git repo.
-		return false, nil
+// verifyRefAndCommit checks that the current working directory is the root of a Git
+// repository at the given commit hash. If a source ref is also specified, verifies
+// that the ref resolves to the given commit hash.
+// Returns an error if the working directory is a Git repository at a different commit
+// or ref.
+func (c *GitClient) verifyRefAndCommit() (bool, error) {
+	checkCmds := []*exec.Cmd{exec.Command("git", "rev-parse", "--verify", "HEAD")}
+	if c.sourceRef != nil {
+		sourceRef := *c.sourceRef
+		checkCmds = append(checkCmds, exec.Command("git", "show-ref", "--hash", "--verify", sourceRef))
 	}
-	lastCommitID := strings.TrimSpace(string(lastCommitIDBytes))
 
-	if lastCommitID != c.sourceDigest.Value {
-		return false, fmt.Errorf("the repo is already checked out at a different commit (%q)", lastCommitID)
+	for _, cmd := range checkCmds {
+		lastCommitIDBytes, err := cmd.Output()
+		if err != nil {
+			// The current working directory is not a git repo.
+			return false, nil
+		}
+		lastCommitID := strings.TrimSpace(string(lastCommitIDBytes))
+
+		if lastCommitID != c.sourceDigest.Value {
+			return false, fmt.Errorf(
+				"%w: the repo is already checked out at a different commit (%q)",
+				errGitCommitMismatch, lastCommitID)
+		}
 	}
 
 	return true, nil
@@ -324,7 +377,7 @@ func (c *GitClient) fetchSourcesFromGitRepo() error {
 
 	// Clone the repo.
 	if err = c.cloneGitRepo(); err != nil {
-		return fmt.Errorf("couldn't clone the Git repo: %v", err)
+		return fmt.Errorf("%w: couldn't clone the Git repo: %w", errGitFetch, err)
 	}
 
 	// Change directory to the root of the cloned repo.
@@ -340,7 +393,7 @@ func (c *GitClient) fetchSourcesFromGitRepo() error {
 
 	// Checkout the commit.
 	if err = c.checkoutGitCommit(); err != nil {
-		return fmt.Errorf("couldn't checkout the Git commit: %v", err)
+		return fmt.Errorf("%w: couldn't checkout the Git commit: %w", errGitCheckout, err)
 	}
 
 	c.checkoutInfo.RepoRoot = cwd
@@ -372,7 +425,7 @@ func (c *GitClient) cloneGitRepo() error {
 		return fmt.Errorf("couldn't start the 'git checkout' command: %v", err)
 	}
 
-	files, err := saveToTempFile(stdout, stderr)
+	files, err := saveToTempFile(c.verbose, stdout, stderr)
 	if err != nil {
 		return fmt.Errorf("cannot save logs and errs to file: %v", err)
 	}
@@ -405,7 +458,7 @@ func (c *GitClient) checkoutGitCommit() error {
 		return fmt.Errorf("couldn't start the 'git checkout' command: %v", err)
 	}
 
-	files, err := saveToTempFile(stdout, stderr)
+	files, err := saveToTempFile(c.verbose, stdout, stderr)
 	if err != nil {
 		return fmt.Errorf("cannot save logs and errs to file: %v", err)
 	}
@@ -417,36 +470,102 @@ func (c *GitClient) checkoutGitCommit() error {
 			err, files[0], files[1])
 	}
 
+	ok, err := c.verifyRefAndCommit()
+	if err != nil || !ok {
+		return fmt.Errorf("failed to verify ref and commit: %v", err)
+	}
+
 	return nil
 }
 
+type tempFileResult struct {
+	File *os.File
+	Err  error
+}
+
+// A helper function used by saveToTempFile to process one individual file.
+// This should be called in a goroutine, and the channels passed in should be owned by the caller,
+// and remain open until the goroutine completes.
+func saveOneTempFile(verbose bool, reader io.Reader, fileChannel chan tempFileResult, printChannel chan string) {
+	var allBytes []byte
+	scanner := bufio.NewScanner(reader)
+	for scanner.Scan() {
+		bytes := scanner.Bytes()
+		allBytes = append(allBytes, bytes...)
+		allBytes = append(allBytes, '\n')
+
+		if verbose {
+			printChannel <- string(bytes)
+		}
+	}
+
+	tmpfile, err := os.CreateTemp("", "log-*.txt")
+	if err != nil {
+		fileChannel <- tempFileResult{Err: err}
+		return
+	}
+	defer tmpfile.Close()
+
+	if _, err := tmpfile.Write(allBytes); err != nil {
+		fileChannel <- tempFileResult{Err: fmt.Errorf("couldn't write bytes to tempfile: %v", err)}
+	} else {
+		fileChannel <- tempFileResult{File: tmpfile}
+	}
+}
+
 // saveToTempFile creates a tempfile in `/tmp` and writes the content of the
-// given reader to that file.
-func saveToTempFile(readers ...io.Reader) ([]string, error) {
-	var files []string
+// given readers to that file.
+// It processes all provided readers concurrently.
+func saveToTempFile(verbose bool, readers ...io.Reader) ([]string, error) {
+	if verbose {
+		fmt.Print("\n\n>>>>>>>>>>>>>> output from command <<<<<<<<<<<<<<\n")
+	}
+	var wg sync.WaitGroup
+	// We need to make sure the fileChannel has enough buffere space to hold everything,
+	// since it won't be processed until the very end.
+	fileChannel := make(chan tempFileResult, len(readers))
+	printChannel := make(chan string)
+
+	// Start a goroutine to process each Reader concurrently.
 	for _, reader := range readers {
-		bytes, err := io.ReadAll(reader)
-		if err != nil {
-			return files, err
-		}
+		wg.Add(1)
+		go func(reader io.Reader) {
+			defer wg.Done()
+			saveOneTempFile(verbose, reader, fileChannel, printChannel)
+		}(reader)
+	}
 
-		tmpfile, err := os.CreateTemp("", "log-*.txt")
-		if err != nil {
-			return files, fmt.Errorf("couldn't create tempfile: %v", err)
-		}
+	// Close the channel once all goroutines have finished.
+	// We do the waiting in a goroutine so that we can move on
+	// to the lines below that handle printing the values passed on
+	// the print channel.
+	go func() {
+		wg.Wait()
+		close(printChannel)
+		close(fileChannel)
+	}()
 
-		if _, err := tmpfile.Write(bytes); err != nil {
-			tmpfile.Close()
-			return files, fmt.Errorf("couldn't write bytes to tempfile: %v", err)
+	// Print the output as it comes in.
+	// Once all of the provided readers have been closed, the WaitGroup
+	// will move to the Done state, completing this loop and allowing us to
+	// move to the filename collection below.
+	for line := range printChannel {
+		fmt.Println(line)
+	}
+
+	var files []string
+	for result := range fileChannel {
+		if result.Err != nil {
+			return nil, result.Err
 		}
-		files = append(files, tmpfile.Name())
+		files = append(files, result.File.Name())
 	}
 
 	return files, nil
 }
 
-// Checks if any files match the given pattern, and returns an error if so.
-func checkExistingFiles(pattern string) error {
+// CheckExistingFiles checks if any files match the given pattern, and returns an error if so.
+func CheckExistingFiles(pattern string) error {
 	matches, err := filepath.Glob(pattern)
 	// The only possible error is ErrBadPattern.
 	if err != nil {
@@ -461,8 +580,9 @@ func checkExistingFiles(pattern string) error {
 
 // Finds all files matching the given pattern, measures the SHA256 digest of
 // each file, and returns filenames and digests as an array of intoto.Subject.
+// This also writes the output to a configured output folder, if provided.
 // Precondition: The pattern is a relative file path pattern.
-func inspectArtifacts(pattern string) ([]intoto.Subject, error) {
+func inspectAndWriteArtifacts(pattern, outputFolder, root string) ([]intoto.Subject, error) {
 	matches, err := filepath.Glob(pattern)
 	// The only possible error is ErrBadPattern.
 	if err != nil {
@@ -475,11 +595,39 @@ func inspectArtifacts(pattern string) ([]intoto.Subject, error) {
 
 	var subjects []intoto.Subject
 	for _, path := range matches {
-		subject, err := toIntotoSubject(path)
+		data, err := utils.SafeReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("couldn't read file %q: %v", path, err)
+		}
+
+		// Write intoto subjects to output
+		subject, err := toIntotoSubject(data, path)
 		if err != nil {
 			return nil, err
 		}
 		subjects = append(subjects, *subject)
+
+		if outputFolder != "" {
+			// Write output file to output folder using the path relative to the root
+			// of the source repository.
+			if root != "" {
+				path, err = filepath.Abs(path)
+				if err != nil {
+					return nil, err
+				}
+			}
+			relPath, err := filepath.Rel(root, path)
+			if err != nil {
+				return nil, fmt.Errorf("Root %s Path %s: %w", root, path, err)
+			}
+			w, err := utils.CreateNewFileUnderDirectory(relPath, outputFolder, os.O_WRONLY)
+			if err != nil {
+				return nil, fmt.Errorf("creating new output file: %v", err)
+			}
+			if _, err := w.Write(data); err != nil {
+				return nil, fmt.Errorf("writing output file: %v", err)
+			}
+		}
 	}
 
 	return subjects, nil
@@ -487,15 +635,10 @@ func inspectArtifacts(pattern string) ([]intoto.Subject, error) {
 
 // Reads the file in the given path and returns its name and digest wrapped in
 // an intoto.Subject.
-func toIntotoSubject(path string) (*intoto.Subject, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("couldn't read file %q: %v", path, err)
-	}
-
+func toIntotoSubject(data []byte, filePath string) (*intoto.Subject, error) {
 	sum256 := sha256.Sum256(data)
 	digest := hex.EncodeToString(sum256[:])
-	name := filepath.Base(path)
+	name := filepath.Base(filePath)
 	subject := &intoto.Subject{
 		Name:   name,
 		Digest: map[string]string{"sha256": digest},
@@ -509,10 +652,77 @@ func (info *RepoCheckoutInfo) Cleanup() {
 	// Some files are generated by the build toolchain (e.g., cargo), and cannot
 	// be removed. We still want to remove all other files to avoid taking up
 	// too much space, particularly when running locally.
-	if len(info.RepoRoot) == 0 {
+	if info.RepoRoot == "" {
 		return
 	}
 	if err := os.RemoveAll(info.RepoRoot); err != nil {
 		log.Printf("failed to remove the temp files: %v", err)
 	}
+}
+
+// ProvenanceStatementSLSA1 is a convenience class to facilitate parsing a
+// JSON document to a SLSAv1 provenance object.
+type ProvenanceStatementSLSA1 struct {
+	intoto.StatementHeader
+	Predicate slsa1.ProvenancePredicate `json:"predicate"`
+}
+
+// ParseProvenance parses a byte array into an instance of ProvenanceStatementSLSA1.
+func ParseProvenance(bytes []byte) (*ProvenanceStatementSLSA1, error) {
+	var statement ProvenanceStatementSLSA1
+	if err := json.Unmarshal(bytes, &statement); err != nil {
+		return nil, fmt.Errorf("could not unmarshal the provenance file:\n%v", err)
+	}
+
+	// ExternalParameters is an interface in slsa1.ProvenancePredicate, so we
+	// marshal and unmarshal it as an instance of ContainerBasedExternalParameters
+	// to be able to use the actual type.
+	var ep ContainerBasedExternalParameters
+	b, err := json.Marshal(statement.Predicate.BuildDefinition.ExternalParameters)
+	if err != nil {
+		return nil, fmt.Errorf("could not marshal map into JSON bytes: %v", err)
+	}
+
+	if err = json.Unmarshal(b, &ep); err != nil {
+		return nil, fmt.Errorf("could not unmarshal JSON bytes into a BuildConfig: %v", err)
+	}
+
+	statement.Predicate.BuildDefinition.ExternalParameters = ep
+
+	return &statement, nil
+}
+
+// ToDockerBuildConfig creates an instance of DockerBuildConfig using the
+// external parameters in this provenance.
+func (p *ProvenanceStatementSLSA1) ToDockerBuildConfig(forceCheckout bool) (*DockerBuildConfig, error) {
+	ep, ok := p.Predicate.BuildDefinition.ExternalParameters.(ContainerBasedExternalParameters)
+	if !ok {
+		return nil, fmt.Errorf("failed to cast ExternalParameters to ContainerBasedExternalParameters")
+	}
+
+	di, err := validateDockerImage(ep.BuilderImage.URI)
+	if err != nil {
+		return nil, fmt.Errorf("validating Docker image URI: %v", err)
+	}
+	if di.Digest.Value != ep.BuilderImage.Digest[di.Digest.Alg] {
+		return nil, fmt.Errorf("invalid Docker image digest")
+	}
+
+	val, ok := ep.Source.Digest["sha1"]
+	if !ok {
+		return nil, fmt.Errorf("missing sha1 digest for source")
+	}
+	sd := Digest{
+		Alg:   "sha1",
+		Value: val,
+	}
+
+	return &DockerBuildConfig{
+		SourceRepo:      ep.Source.URI,
+		SourceDigest:    sd,
+		BuilderImage:    *di,
+		BuildConfigPath: ep.ConfigPath,
+		ForceCheckout:   forceCheckout,
+		Verbose:         false,
+	}, nil
 }

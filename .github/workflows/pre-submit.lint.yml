@@ -1,22 +1,94 @@
+# Copyright 2023 SLSA Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 name: Lint
 
-on: [pull_request]
+on:
+  push:
+    branches: [main, "*"]
+  pull_request:
+    # The branches below must be a subset of the branches above
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
 
 permissions:
   # Needed to check out the repo.
   contents: read
 
 jobs:
+  formatting:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@3041bf56c941b39c61721a86cd11f3bb1338122a # v5.2.0
+        with:
+          go-version: "1.22.3"
+      - uses: actions/setup-node@1a4442cacd436585916779262731d5b162bc6ec7 # v3.8.2
+        with:
+          node-version: 20
+
+      - name: Install gofumpt
+        run: go install mvdan.cc/gofumpt@v0.6.0
+
+      - name: Install shfmt
+        env:
+          SHFMT_VERSION: "3.8.0"
+          SHFMT_CHECKSUM: "27b3c6f9d9592fc5b4856c341d1ff2c88856709b9e76469313642a1d7b558fe0"
+        run: |
+          set -euo pipefail
+
+          #Install golangci-lint
+          curl -sSLo shfmt "https://github.com/mvdan/sh/releases/download/v${SHFMT_VERSION}/shfmt_v${SHFMT_VERSION}_linux_amd64"
+          echo "shfmt checksum is $(sha256sum shfmt | awk '{ print $1 }')"
+          echo "expected checksum is ${SHFMT_CHECKSUM}"
+          echo "${SHFMT_CHECKSUM}  shfmt" | sha256sum --strict --check --status || exit 1
+          chmod +x shfmt
+          mv shfmt /usr/local/bin
+
+      - run: make format
+      - name: Check for unformatted files
+        id: diff
+        run: |
+          set -euo pipefail
+          if [ "$(git diff --ignore-space-at-eol . | wc -l)" -gt "0" ]; then
+            echo "Detected uncommitted changes after formatting."
+            echo "Run 'make format' to format files in your PR."
+            echo "See status below:"
+            git diff
+            exit 1
+          fi
+
+  markdownlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: 20
+      - run: make markdownlint
+
   golangci-lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@755da8c3cf115ac066823e79a1e1788f8940201b # v3.2.0
-      - uses: actions/setup-go@6edd4406fa81c3da01a34fa6f6343087c207a568 # v3.5.0
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@3041bf56c941b39c61721a86cd11f3bb1338122a # v5.2.0
         with:
-          go-version: 1.19
+          go-version-file: "go.mod"
       - env:
-          GOLANGCI_LINT_VERSION: "1.50.1"
-          GOLANGCI_LINT_CHECKSUM: "4ba1dc9dbdf05b7bdc6f0e04bdfe6f63aa70576f51817be1b2540bbce017b69a"
+          GOLANGCI_LINT_VERSION: "1.61.0"
+          GOLANGCI_LINT_CHECKSUM: "77cb0af99379d9a21d5dc8c38364d060e864a01bd2f3e30b5e8cc550c3a54111"
         run: |
           set -euo pipefail
 
@@ -24,9 +96,9 @@ jobs:
           curl -sSLo golangci-lint.tar.gz "https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_LINT_VERSION}/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64.tar.gz"
           echo "golangci-lint checksum is $(sha256sum golangci-lint.tar.gz | awk '{ print $1 }')"
           echo "expected checksum is $GOLANGCI_LINT_CHECKSUM"
-          echo "$GOLANGCI_LINT_CHECKSUM  golangci-lint.tar.gz" | sha256sum --strict --check --status || exit -2
+          echo "$GOLANGCI_LINT_CHECKSUM  golangci-lint.tar.gz" | sha256sum --strict --check --status || exit 1
           tar xf golangci-lint.tar.gz
-          mv golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64/golangci-lint /usr/local/bin
+          mv "golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64/golangci-lint" /usr/local/bin
 
           # Run golangci-lint
           make golangci-lint
@@ -34,10 +106,11 @@ jobs:
   shellcheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@755da8c3cf115ac066823e79a1e1788f8940201b # v3.2.0
-      - env:
-          SHELLCHECK_VERSION: "0.8.0"
-          SHELLCHECK_CHECKSUM: "ab6ee1b178f014d1b86d1e24da20d1139656c8b0ed34d2867fbb834dad02bf0a"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: shellcheck
+        env:
+          SHELLCHECK_VERSION: "0.10.0"
+          SHELLCHECK_CHECKSUM: "6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87"
         run: |
           set -euo pipefail
 
@@ -45,26 +118,40 @@ jobs:
           curl -sSLo shellcheck.tar.gz "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
           echo "shellcheck checksum is $(sha256sum shellcheck.tar.gz | awk '{ print $1 }')"
           echo "expected checksum is $SHELLCHECK_CHECKSUM"
-          echo "$SHELLCHECK_CHECKSUM  shellcheck.tar.gz" | sha256sum --strict --check --status || exit -2
+          echo "$SHELLCHECK_CHECKSUM  shellcheck.tar.gz" | sha256sum --strict --check --status || exit 1
 
           tar xf shellcheck.tar.gz
-          mv "shellcheck-v$SHELLCHECK_VERSION/shellcheck" /usr/local/bin
+          mv "shellcheck-v${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin
 
-          # Run shellcheck and output github actions commands.
-          # See: https://docs.github.com/en/actions/using-workflows/workflow-commands-for-github-actions
           make shellcheck
+
+      - name: actionlint
+        env:
+          ACTIONLINT_VERSION: "1.7.0"
+          ACTIONLINT_CHECKSUM: "8aae9148f61952d11a97651852fdc7dffd2b762ed3cdd28b3c2232ae5f55d4db"
+        run: |
+          set -euo pipefail
+
+          # Install actionlint
+          curl -sSLo actionlint.tar.gz "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "actionlint checksum is $(sha256sum actionlint.tar.gz | awk '{ print $1 }')"
+          echo "expected checksum is $ACTIONLINT_CHECKSUM"
+          echo "$ACTIONLINT_CHECKSUM  actionlint.tar.gz" | sha256sum --strict --check --status || exit 1
+
+          tar xf actionlint.tar.gz
+          mv ./actionlint /usr/local/bin
+
+          make actionlint
 
   yamllint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@755da8c3cf115ac066823e79a1e1788f8940201b # v3.2.0
-      - env:
-          YAMLLINT_VERSION: "1.26.3"
-        run: |
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: |
           set -euo pipefail
 
           # Install yamllint
-          pip install "yamllint==${YAMLLINT_VERSION}"
+          pip install -r requirements.txt --require-hashes
 
           # Run yamllint
           make yamllint
@@ -72,8 +159,17 @@ jobs:
   eslint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@755da8c3cf115ac066823e79a1e1788f8940201b # v3.2.0
-      - uses: actions/setup-node@v3
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
         with:
-          node-version: 16
+          node-version: 20
       - run: make eslint
+
+  renovate-config-validator:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: 20
+      - run: make renovate-config-validator

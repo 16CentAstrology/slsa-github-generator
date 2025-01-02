@@ -28,11 +28,20 @@ defaults:
 on:
   workflow_call:
     secrets:
+      # Note: This should only be used for high entropy values such as AWS Access Key.
+      # See https://github.com/slsa-framework/slsa-github-generator/tree/main/internal/builders/container#workflow-inputs for more information.
       registry-username:
         description: "Username to log into the container registry."
       registry-password:
         description: "Password to log in the container registry."
-        required: true
+      image:
+        description: "The OCI image name. This must not include a tag or digest."
+      # Note: This should only be used for high entropy values such as AWS Access Key.
+      # See https://github.com/slsa-framework/slsa-github-generator/tree/main/internal/builders/container#workflow-inputs for more information.
+      provenance-registry-username:
+        description: "Username when publishing to provenance repository (option 'provenance-repository') instead of image repository."
+      provenance-registry-password:
+        description: "Password when publishing to provenance repository instead of image repository."
     inputs:
       image:
         description: "The OCI image name. This must not include a tag or digest."
@@ -60,6 +69,24 @@ on:
         required: false
         type: boolean
         default: false
+      gcp-workload-identity-provider:
+        description: "The full identifier of the Workload Identity Provider, including the project number, pool name, and provider name.."
+        required: false
+        type: string
+        default: ""
+      gcp-service-account:
+        description: "Email address or unique identifier of the Google Cloud service account for which to generate credentials."
+        required: false
+        type: string
+        default: ""
+      provenance-registry-username:
+        description: "Username when publishing to provenance registry (option 'provenance-repository') instead of image repository."
+        required: false
+        type: string
+      provenance-repository:
+        description: "If set, provenance is pushed to this registry instead of image registry."
+        required: false
+        type: string
     outputs:
       # Note: we use this output because there is no buildt-in `outcome` and `result` is always `success`
       # if `continue-on-error` is set to `true`.
@@ -85,14 +112,15 @@ jobs:
       - name: Detect the generator ref
         id: detect
         continue-on-error: true
-        uses: slsa-framework/slsa-github-generator/.github/actions/detect-workflow@main
+        uses: slsa-framework/slsa-github-generator/.github/actions/detect-workflow-js@main
 
       - name: Final outcome
         id: final
         env:
           SUCCESS: ${{ steps.detect.outcome != 'failure' }}
         run: |
-          echo "outcome=$([ "$SUCCESS" == "true" ] && echo "success" || echo "failure")" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          echo "outcome=$([ "$SUCCESS" == "true" ] && echo "success" || echo "failure")" >> "$GITHUB_OUTPUT"
 
   # generator builds the generator binary and runs it to generate SLSA
   # provenance.
@@ -109,7 +137,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [detect-env]
     permissions:
-      id-token: write # Needed to get OIDC token for keyless signing.
+      id-token: write # Needed to get OIDC token for keyless signing, and for GCP Auth.
       actions: read # Needed to read workflow info.
       packages: write # Needed to login and upload attestations to ghcr.io.
     steps:
@@ -120,17 +148,30 @@ jobs:
         with:
           repository: "${{ needs.detect-env.outputs.repository }}"
           ref: "${{ needs.detect-env.outputs.ref }}"
-          go-version: 1.19
+          go-version: "1.21"
           binary: "${{ env.BUILDER_BINARY }}"
           compile-builder: "${{ inputs.compile-generator }}"
           # NOTE: We are using the generic generator.
           directory: "${{ env.BUILDER_DIR }}"
           allow-private-repository: ${{ inputs.private-repository }}
 
-      - uses: sigstore/cosign-installer@9becc617647dfa20ae7b1151972e9b3a2c338a2b # tag=v2.8.1
-        id: cosign-install
+      - id: auth
+        name: Authenticate to Google Cloud
+        if: inputs.gcp-workload-identity-provider != ''
+        uses: google-github-actions/auth@6fc4af4b145ae7821d527454aa9bd537d1f2dc5f # v2.1.7
+        with:
+          token_format: "access_token"
+          workload_identity_provider: ${{ inputs.gcp-workload-identity-provider }}
+          service_account: ${{ inputs.gcp-service-account }}
+
+      - id: cosign-install
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: v2.2.3
         continue-on-error: true
 
+      # TODO(#2974): consolidate this code into a script
+      # The script below is a duplicate of the code used for signing into the provenance registry
       - name: Login
         id: login
         continue-on-error: true
@@ -139,6 +180,7 @@ jobs:
           UNTRUSTED_INPUT_USERNAME: "${{ inputs.registry-username }}"
           UNTRUSTED_SECRET_USERNAME: "${{ secrets.registry-username }}"
           UNTRUSTED_PASSWORD: "${{ secrets.registry-password }}"
+          GCP_ACCESS_TOKEN: "${{ steps.auth.outputs.access_token }}"
         run: |
           set -euo pipefail
 
@@ -153,14 +195,69 @@ jobs:
             untrusted_registry="${maybe_domain}"
           fi
 
-          username="${UNTRUSTED_SECRET_USERNAME:-${UNTRUSTED_INPUT_USERNAME}}"
-          if [ "${username}" == "" ]; then
-              echo "registry-username is required." >&2
-              exit 1
+          if [ "${GCP_ACCESS_TOKEN}" != "" ]; then
+            username="oauth2accesstoken"
+            password="${GCP_ACCESS_TOKEN}"
+          else
+            username="${UNTRUSTED_SECRET_USERNAME:-${UNTRUSTED_INPUT_USERNAME}}"
+            if [ "${username}" == "" ]; then
+                echo "registry-username is required." >&2
+                exit 1
+            fi
+            password="${UNTRUSTED_PASSWORD}"
+            if [ "${password}" == "" ]; then
+                echo "registry-password is required." >&2
+                exit 1
+            fi
           fi
 
           echo "login to ${untrusted_registry}"
-          cosign login "${untrusted_registry}" -u "${username}" -p "${UNTRUSTED_PASSWORD}"
+          cosign login "${untrusted_registry}" -u "${username}" -p "${password}"
+
+      # TODO(#2974): consolidate this code into a script
+      # The script below is a duplicate of the code used for signing into the main registry
+      - name: Provenance registry login
+        id: provenance-registry-login
+        continue-on-error: true
+        env:
+          UNTRUSTED_PROVENANCE_REPOSITORY: "${{ inputs.provenance-repository  }}"
+          UNTRUSTED_INPUT_PROVENANCE_USERNAME: "${{ inputs.provenance-registry-username }}"
+          UNTRUSTED_SECRET_PROVENANCE_USERNAME: "${{ secrets.provenance-registry-username }}"
+          UNTRUSTED_PROVENANCE_PASSWORD: "${{ secrets.provenance-registry-password }}"
+          GCP_ACCESS_TOKEN: "${{ steps.auth.outputs.access_token }}"
+        if: ${{ env.UNTRUSTED_PROVENANCE_REPOSITORY != '' }}
+        run: |
+          set -euo pipefail
+
+          # NOTE: Some registries are of the form <org>/<name>
+          # Here we get the first part and check if it has a '.' or ':'
+          # character in it to see if it's a domain name.
+          # See: https://stackoverflow.com/questions/37861791/how-are-docker-image-names-parsed#37867949
+
+          untrusted_provenance_domain="docker.io"
+          maybe_provenance_domain=$(echo "${UNTRUSTED_PROVENANCE_REPOSITORY}" | cut -f1 -d "/" | { grep -E "\.|:" || true; })
+          if [ "${maybe_provenance_domain}" != "" ]; then
+            untrusted_provenance_domain="${maybe_provenance_domain}"
+          fi
+
+          if [ "${GCP_ACCESS_TOKEN}" != "" ]; then
+            username="oauth2accesstoken"
+            password="${GCP_ACCESS_TOKEN}"
+          else
+            username="${UNTRUSTED_SECRET_PROVENANCE_USERNAME:-${UNTRUSTED_INPUT_PROVENANCE_USERNAME}}"
+            if [ "${username}" == "" ]; then
+                echo "provenance-registry-username is required." >&2
+                exit 1
+            fi
+            password="${UNTRUSTED_PROVENANCE_PASSWORD}"
+            if [ "${password}" == "" ]; then
+                echo "provenance-registry-password is required." >&2
+                exit 1
+            fi
+          fi
+
+          echo "login to provenance registry: ${untrusted_provenance_domain}"
+          cosign login "${untrusted_provenance_domain}" -u "${username}" -p "${password}"
 
       - name: Create and sign provenance
         id: sign-prov
@@ -169,6 +266,8 @@ jobs:
           UNTRUSTED_IMAGE: "${{ inputs.image }}"
           UNTRUSTED_DIGEST: "${{ inputs.digest }}"
           GITHUB_CONTEXT: "${{ toJSON(github) }}"
+          VARS_CONTEXT: "${{ toJSON(vars) }}"
+          UNTRUSTED_PROVENANCE_REPOSITORY: "${{ inputs.provenance-repository }}"
         run: |
           set -euo pipefail
 
@@ -176,9 +275,14 @@ jobs:
           predicate_name="predicate.json"
           "$GITHUB_WORKSPACE/$BUILDER_BINARY" generate --predicate="$predicate_name"
 
-          COSIGN_EXPERIMENTAL=1 cosign attest --predicate="$predicate_name" \
+          if [[ -n "${UNTRUSTED_PROVENANCE_REPOSITORY}" ]]; then
+            export COSIGN_REPOSITORY="${UNTRUSTED_PROVENANCE_REPOSITORY}"
+          fi
+
+          COSIGN_EXPERIMENTAL=1 \
+          cosign attest --predicate="$predicate_name" \
             --type slsaprovenance \
-            --force \
+            --yes \
             "${UNTRUSTED_IMAGE}@${UNTRUSTED_DIGEST}"
 
       - name: Final outcome
@@ -186,7 +290,8 @@ jobs:
         env:
           SUCCESS: ${{ steps.generate-builder.outcome != 'failure' && steps.cosign-install.outcome != 'failure' && steps.login.outcome != 'failure' && steps.sign-prov.outcome != 'failure' }}
         run: |
-          echo "outcome=$([ "$SUCCESS" == "true" ] && echo "success" || echo "failure")" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          echo "outcome=$([ "$SUCCESS" == "true" ] && echo "success" || echo "failure")" >> "$GITHUB_OUTPUT"
 
   # final fails or succeeds based on the value of `inputs.continue-on-error`
   # and the outcome of previous jobs.
@@ -204,5 +309,6 @@ jobs:
           SUCCESS: ${{ needs.detect-env.outputs.outcome != 'failure' && needs.generator.outputs.outcome != 'failure' }}
           CONTINUE: ${{ inputs.continue-on-error }}
         run: |
-          echo "outcome=$([ "$SUCCESS" == "true" ] && echo "success" || echo "failure")" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          echo "outcome=$([ "$SUCCESS" == "true" ] && echo "success" || echo "failure")" >> "$GITHUB_OUTPUT"
           [ "$CONTINUE" == "true" ] || [ "$SUCCESS" == "true" ] || exit 27

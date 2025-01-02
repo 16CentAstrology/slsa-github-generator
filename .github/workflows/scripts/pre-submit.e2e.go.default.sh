@@ -1,4 +1,18 @@
-#!/usr/bin/env bash
+#!/bin/bash -eu
+#
+# Copyright 2023 SLSA Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # To test:
 # export GITHUB_SHA=6f3b6435f5a17a25ad6cf2704d0c192bcef8193f
@@ -46,14 +60,14 @@ e2e_verify_predicate_buildConfig_step_env "1" "$ATTESTATION" "[\"GOOS=linux\",\"
 e2e_verify_predicate_buildConfig_step_workingDir "1" "$ATTESTATION" "$PWD/__PROJECT_CHECKOUT_DIR__/internal/builders/go/e2e-presubmits"
 
 if [[ -n "$LDFLAGS" ]]; then
-    e2e_verify_predicate_buildConfig_step_command "1" "$ATTESTATION" "[\"build\",\"-mod=vendor\",\"-trimpath\",\"-tags=netgo\",\"-ldflags=-X main.gitVersion=v1.2.3 -X main.gitCommit=abcdef -X main.gitBranch=$BRANCH\",\"-o\",\"$BINARY\",\"main.go\"]"
-    chmod a+x ./"$BINARY"
-    V=$(./"$BINARY" | grep 'GitVersion: v1.2.3')
-    C=$(./"$BINARY" | grep 'GitCommit: abcdef')
-    B=$(./"$BINARY" | grep "GitBranch: main")
-    e2e_assert_not_eq "$V" "" "GitVersion should not be empty"
-    e2e_assert_not_eq "$C" "" "GitCommit should not be empty"
-    e2e_assert_not_eq "$B" "" "GitBranch should not be empty"
+  e2e_verify_predicate_buildConfig_step_command "1" "$ATTESTATION" "[\"build\",\"-mod=vendor\",\"-trimpath\",\"-tags=netgo\",\"-ldflags=-X main.gitVersion=v1.2.3 -X main.gitCommit=abcdef -X main.gitBranch=$BRANCH\",\"-o\",\"$BINARY\",\"main.go\"]"
+  chmod a+x ./"$BINARY"
+  V=$(./"$BINARY" | grep 'GitVersion: v1.2.3')
+  C=$(./"$BINARY" | grep 'GitCommit: abcdef')
+  B=$(./"$BINARY" | grep "GitBranch: main")
+  e2e_assert_not_eq "$V" "" "GitVersion should not be empty"
+  e2e_assert_not_eq "$C" "" "GitCommit should not be empty"
+  e2e_assert_not_eq "$B" "" "GitBranch should not be empty"
 else
-    e2e_verify_predicate_buildConfig_step_command "1" "$ATTESTATION" "[\"build\",\"-mod=vendor\",\"-trimpath\",\"-tags=netgo\",\"-o\",\"$BINARY\",\"main.go\"]"
+  e2e_verify_predicate_buildConfig_step_command "1" "$ATTESTATION" "[\"build\",\"-mod=vendor\",\"-trimpath\",\"-tags=netgo\",\"-o\",\"$BINARY\",\"main.go\"]"
 fi

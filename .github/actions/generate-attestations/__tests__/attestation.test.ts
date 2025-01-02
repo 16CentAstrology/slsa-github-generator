@@ -1,3 +1,17 @@
+// Copyright 2023 SLSA Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 import * as types from "../src/intoto";
 const fs = require("fs");
 const statement = require("../src/attestation");
@@ -22,7 +36,7 @@ describe("createStatement", () => {
     const attestation = statement.createStatement(
       subjects,
       predicateType,
-      predicate
+      predicate,
     );
     expect(attestation.subject).toEqual(subjects);
     expect(attestation.predicateType).toEqual(predicateType);
@@ -75,10 +89,10 @@ describe("writeAttestation", () => {
     const attestations: Record<string, string> = statement.writeAttestations(
       "layoutMock",
       predicateType,
-      "predicateMock"
+      "predicateMock",
     );
     expect(Object.keys(attestations)).toEqual(
-      expect.arrayContaining(["attestation1.intoto", "attestation2.intoto"])
+      expect.arrayContaining(["attestation1.intoto", "attestation2.intoto"]),
     );
   });
 
@@ -113,7 +127,7 @@ describe("writeAttestation", () => {
     fs.readFileSync.mockReturnValueOnce(JSON.stringify(predicate));
 
     expect(() =>
-      statement.writeAttestations("layoutMock", predicateType, "predicateMock")
+      statement.writeAttestations("layoutMock", predicateType, "predicateMock"),
     ).toThrow(Error);
   });
 
@@ -129,7 +143,7 @@ describe("writeAttestation", () => {
     fs.readFileSync.mockReturnValueOnce(JSON.stringify(predicate));
 
     expect(() =>
-      statement.writeAttestations("layoutMock", predicateType, "predicateMock")
+      statement.writeAttestations("layoutMock", predicateType, "predicateMock"),
     ).toThrow(Error);
   });
 });

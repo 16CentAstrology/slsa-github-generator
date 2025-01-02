@@ -15,13 +15,13 @@
 package utils
 
 import (
+	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-
-	"github.com/slsa-framework/slsa-github-generator/internal/errors"
 )
 
 func Test_PathIsUnderCurrentDirectory(t *testing.T) {
@@ -60,16 +60,15 @@ func Test_PathIsUnderCurrentDirectory(t *testing.T) {
 		{
 			name:     "parent invalid path",
 			path:     "../invalid/path",
-			expected: &ErrInvalidPath{},
+			expected: ErrInvalidPath,
 		},
 		{
 			name:     "some invalid fullpath",
 			path:     "/some/invalid/fullpath",
-			expected: &ErrInvalidPath{},
+			expected: ErrInvalidPath,
 		},
 	}
 	for _, tt := range tests {
-		tt := tt // Re-initializing variable so it is not changed while executing the closure below
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -79,7 +78,7 @@ func Test_PathIsUnderCurrentDirectory(t *testing.T) {
 				t.Fatalf("unexpected error: %v", cmp.Diff(err, tt.expected, cmpopts.EquateErrors()))
 			}
 
-			if err != nil && !errors.As(err, &tt.expected) {
+			if err != nil && !errors.Is(err, tt.expected) {
 				t.Fatalf("unexpected error: %v", cmp.Diff(err, tt.expected, cmpopts.EquateErrors()))
 			}
 		})
@@ -102,26 +101,25 @@ func Test_VerifyAttestationPath(t *testing.T) {
 		{
 			name:     "invalid path",
 			path:     "../some/invalid/valid.intoto.jsonl",
-			expected: &ErrInvalidPath{},
+			expected: ErrInvalidPath,
 		},
 		{
 			name:     "invalid extension",
 			path:     "some/file.ntoto.jsonl",
-			expected: &ErrInvalidPath{},
+			expected: ErrInvalidPath,
 		},
 		{
 			name:     "invalid not exntension",
 			path:     "some/file.intoto.jsonl.",
-			expected: &ErrInvalidPath{},
+			expected: ErrInvalidPath,
 		},
 		{
 			name:     "invalid folder exntension",
 			path:     "file.intoto.jsonl/file",
-			expected: &ErrInvalidPath{},
+			expected: ErrInvalidPath,
 		},
 	}
 	for _, tt := range tests {
-		tt := tt // Re-initializing variable so it is not changed while executing the closure below
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -131,7 +129,7 @@ func Test_VerifyAttestationPath(t *testing.T) {
 				t.Fatalf("unexpected error: %v", cmp.Diff(err, tt.expected, cmpopts.EquateErrors()))
 			}
 
-			if err != nil && !errors.As(err, &tt.expected) {
+			if err != nil && !errors.Is(err, tt.expected) {
 				t.Fatalf("unexpected error: %v", cmp.Diff(err, tt.expected, cmpopts.EquateErrors()))
 			}
 		})
@@ -169,18 +167,18 @@ func Test_CreateNewFileUnderCurrentDirectory(t *testing.T) {
 		{
 			name:     "valid file cannot create",
 			path:     "./path/to/validfile",
-			expected: &ErrInvalidPath{},
+			expected: ErrInvalidPath,
 		},
 		{
 			name:     "invalid path",
 			path:     "../some/invalid/file",
-			expected: &ErrInvalidPath{},
+			expected: ErrInvalidPath,
 		},
 		{
 			name:         "existing file",
 			path:         "existing_file",
 			existingPath: true,
-			expected:     &ErrInvalidPath{},
+			expected:     ErrInvalidPath,
 		},
 		{
 			name: "new file",
@@ -189,11 +187,10 @@ func Test_CreateNewFileUnderCurrentDirectory(t *testing.T) {
 		{
 			name:     "new file in sub-directory",
 			path:     "dir/new_file",
-			expected: &ErrInvalidPath{},
+			expected: ErrInvalidPath,
 		},
 	}
 	for _, tt := range tests {
-		tt := tt // Re-initializing variable so it is not changed while executing the closure below
 		t.Run(tt.name, func(t *testing.T) {
 			cleanup, err := tempWD()
 			if err != nil {
@@ -217,7 +214,80 @@ func Test_CreateNewFileUnderCurrentDirectory(t *testing.T) {
 				t.Fatalf("unexpected error: %v", cmp.Diff(err, tt.expected, cmpopts.EquateErrors()))
 			}
 
-			if err != nil && !errors.As(err, &tt.expected) {
+			if err != nil && !errors.Is(err, tt.expected) {
+				t.Fatalf("unexpected error: %v", cmp.Diff(err, tt.expected, cmpopts.EquateErrors()))
+			}
+		})
+	}
+}
+
+func Test_PathIsUnderDirectory(t *testing.T) {
+	tests := []struct {
+		expected error
+		name     string
+		path     string
+		dir      string
+	}{
+		{
+			name:     "valid same path",
+			path:     "./",
+			dir:      "./",
+			expected: nil,
+		},
+		{
+			name:     "valid path no slash",
+			path:     "./some/valid/path",
+			dir:      ".",
+			expected: nil,
+		},
+		{
+			name:     "valid path with slash",
+			path:     "./some/valid/path/",
+			dir:      ".",
+			expected: nil,
+		},
+		{
+			name:     "valid path with no dot",
+			path:     "some/valid/path/",
+			dir:      "some/valid/",
+			expected: nil,
+		},
+		{
+			name: "some valid path",
+			path: "../utils/some/valid/path",
+			dir:  "../utils",
+		},
+		{
+			name:     "parent invalid path",
+			path:     "../invalid/path",
+			dir:      ".",
+			expected: ErrInvalidPath,
+		},
+		{
+			name: "some valid fullpath",
+			path: "/some/invalid/fullpath",
+			dir:  "/some",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			wd, err := os.Getwd()
+			if err != nil {
+				t.Fatal(err)
+			}
+			d, err := filepath.Abs(filepath.Join(wd, tt.dir))
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = PathIsUnderDirectory(tt.path, d)
+			if (err == nil && tt.expected != nil) ||
+				(err != nil && tt.expected == nil) {
+				t.Fatalf("unexpected error: %v", cmp.Diff(err, tt.expected, cmpopts.EquateErrors()))
+			}
+
+			if err != nil && !errors.Is(err, tt.expected) {
 				t.Fatalf("unexpected error: %v", cmp.Diff(err, tt.expected, cmpopts.EquateErrors()))
 			}
 		})

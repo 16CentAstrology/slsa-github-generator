@@ -19,7 +19,7 @@ import (
 
 	// TODO: Allow use of other OIDC providers?
 	// Enable the github OIDC auth provider.
-	_ "github.com/sigstore/cosign/pkg/providers/github"
+	_ "github.com/sigstore/cosign/v2/pkg/providers/github"
 	"github.com/slsa-framework/slsa-github-generator/signing/sigstore"
 
 	"github.com/spf13/cobra"
@@ -31,7 +31,7 @@ func rootCmd() *cobra.Command {
 		Short: "Generate SLSA provenance for Github Actions",
 		Long: `Generate SLSA provenance for Github Actions.
 For more information on SLSA, visit https://slsa.dev`,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			return errors.New("expected command")
 		},
 	}

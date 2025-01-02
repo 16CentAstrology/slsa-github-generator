@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -27,7 +28,6 @@ import (
 
 	"github.com/slsa-framework/slsa-github-generator/github"
 	"github.com/slsa-framework/slsa-github-generator/internal/builders/common"
-	"github.com/slsa-framework/slsa-github-generator/internal/errors"
 	"github.com/slsa-framework/slsa-github-generator/internal/utils"
 	"github.com/slsa-framework/slsa-github-generator/signing"
 	"github.com/slsa-framework/slsa-github-generator/slsa"
@@ -38,7 +38,7 @@ func attestCmd(provider slsa.ClientProvider, check func(error),
 	signer signing.Signer, tlog signing.TransparencyLog,
 ) *cobra.Command {
 	var attPath string
-	var subjects string
+	var subjectsFilename string
 
 	c := &cobra.Command{
 		Use:   "attest",
@@ -47,13 +47,17 @@ func attestCmd(provider slsa.ClientProvider, check func(error),
 and upload to a Rekor transparency log. This command assumes that it is being
 run in the context of a Github Actions workflow.`,
 
-		Run: func(cmd *cobra.Command, args []string) {
+		Run: func(_ *cobra.Command, _ []string) {
 			ghContext, err := github.GetWorkflowContext()
 			check(err)
 
-			parsedSubjects, err := parseSubjects(subjects)
+			varsContext, err := github.GetVarsContext()
 			check(err)
 
+			subjectsBytes, err := utils.SafeReadFile(subjectsFilename)
+			check(err)
+			parsedSubjects, err := parseSubjects(string(subjectsBytes))
+			check(err)
 			if len(parsedSubjects) == 0 {
 				check(errors.New("expected at least one subject"))
 			}
@@ -77,26 +81,22 @@ run in the context of a Github Actions workflow.`,
 			ctx := context.Background()
 
 			b := common.GenericBuild{
-				GithubActionsBuild: slsa.NewGithubActionsBuild(parsedSubjects, ghContext),
+				GithubActionsBuild: slsa.NewGithubActionsBuild(parsedSubjects, &ghContext, varsContext),
 				BuildTypeURI:       provenanceOnlyBuildType,
 			}
 			if provider != nil {
 				b.WithClients(provider)
-			} else {
+			} else if utils.IsPresubmitTests() {
 				// TODO(github.com/slsa-framework/slsa-github-generator/issues/124): Remove
-				if utils.IsPresubmitTests() {
-					b.WithClients(&slsa.NilClientProvider{})
-				}
+				b.WithClients(&slsa.NilClientProvider{})
 			}
 
 			g := slsa.NewHostedActionsGenerator(&b)
 			if provider != nil {
 				g.WithClients(provider)
-			} else {
+			} else if utils.IsPresubmitTests() {
 				// TODO(github.com/slsa-framework/slsa-github-generator/issues/124): Remove
-				if utils.IsPresubmitTests() {
-					g.WithClients(&slsa.NilClientProvider{})
-				}
+				g.WithClients(&slsa.NilClientProvider{})
 			}
 
 			p, err := g.Generate(ctx)
@@ -137,9 +137,8 @@ run in the context of a Github Actions workflow.`,
 		"Path to write the signed provenance.",
 	)
 	c.Flags().StringVarP(
-		&subjects, "subjects", "s", "",
-		"Formatted list of subjects in the same format as sha256sum (base64 encoded).",
+		&subjectsFilename, "subjects-filename", "f", "",
+		"Filename containing a formatted list of subjects in the same format as sha256sum (base64 encoded).",
 	)
-
 	return c
 }

@@ -4,17 +4,27 @@ This document explains how to use the builder for [Go](https://go.dev/) projects
 
 ---
 
-- [Generation of provenance](#generation)
+<!-- markdown-toc --bullets="-" -i README.md -->
+
+<!-- toc -->
+
+- [Generation](#generation)
   - [Referencing the SLSA builder](#referencing-the-slsa-builder)
   - [Private Repositories](#private-repositories)
   - [Supported Triggers](#supported-triggers)
   - [Configuration File](#configuration-file)
-  - [Migration from GoReleaser](#migration-from-GoReleaser)
+  - [Migration from GoReleaser](#migration-from-goreleaser)
+  - [Multi-platform builds](#multi-platform-builds)
   - [Workflow Inputs](#workflow-inputs)
+  - [Workflow Outputs](#workflow-outputs)
   - [Workflow Example](#workflow-example)
   - [Provenance Example](#provenance-example)
   - [BuildConfig Format](#buildconfig-format)
-  - [Known Issues](#known-issues)
+- [Known Issues](#known-issues)
+  - [error updating to TUF remote mirror: tuf: invalid key](#error-updating-to-tuf-remote-mirror-tuf-invalid-key)
+  - [Compatibility with `actions/download-artifact`](#compatibility-with-actionsdownload-artifact)
+
+<!-- tocstop -->
 
 ---
 
@@ -145,6 +155,32 @@ The configuration file accepts many of the common fields GoReleaser uses, as you
 
 If you think you need support for other variables, please [open an issue](https://github.com/slsa-framework/slsa-github-generator/issues/new).
 
+### Multi-platform builds
+
+It's easy to generate binaries for multiple platforms. To accomplish this, we can use the [maxtrix functionality](https://docs.github.com/en/actions/using-jobs/using-a-matrix-for-your-jobs) of github actions and several config files. In the below code sample, you'll see that we have a `strategy` section which lists the platforms and architectures to build for. These reference a `config-file` property at the bottom which will select the correct config for that platform.
+
+```yaml
+build:
+  permissions:
+    id-token: write # To sign the provenance.
+    contents: write # To upload assets to release.
+    actions: read # To read the workflow path.
+  strategy:
+    matrix:
+      os:
+        - linux
+        - windows
+        - darwin
+      arch:
+        - amd64
+        - arm64
+  uses: slsa-framework/slsa-github-generator/.github/workflows/builder_go_slsa3.yml@v2.0.0
+  with:
+    go-version: 1.19
+    config-file: .slsa-goreleaser/${{matrix.os}}-${{matrix.arch}}.yml
+    # ... your other stuff here.
+```
+
 ### Workflow Inputs
 
 The builder workflow [slsa-framework/slsa-github-generator/.github/workflows/builder_go_slsa3.yml](https://github.com/slsa-framework/slsa-github-generator/blob/main/.github/workflows/builder_go_slsa3.yml) accepts the following inputs:
@@ -153,9 +189,22 @@ The builder workflow [slsa-framework/slsa-github-generator/.github/workflows/bui
 | -------------------- | -------- | --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `config-file`        | no       | `.github/workflows/slsa-goreleaser.yml` | The configuration file for the builder. A path within the calling repository.                                                                                                                                                                             |
 | `evaluated-envs`     | no       | empty value                             | A list of environment variables, seperated by `,`: `VAR1: value, VAR2: value`. This is typically used to pass dynamically-generated values, such as `ldflags`. Note that only environment variables with names starting with `CGO_` or `GO` are accepted. |
-| `go-version`         | yes      |                                         | The go version for your project. This value is passed, unchanged, to the [actions/setup-go](https://github.com/actions/setup-go) action when setting up the environment                                                                                   |
+| `go-version`         | no       |                                         | The go version for your project. This value is passed, unchanged, to the [actions/setup-go](https://github.com/actions/setup-go) action when setting up the environment. One of `go-version` or `go-version-file` is required.                            |
+| `go-version-file`    | no       |                                         | The go version file (e.g. `go.mod`) for your project. This value is passed, unchanged, to the [actions/setup-go](https://github.com/actions/setup-go) action when setting up the environment. One of `go-version` or `go-version-file` is required.       |
 | `upload-assets`      | no       | true on new tags                        | Whether to upload assets to a GitHub release or not.                                                                                                                                                                                                      |
+| `upload-tag-name`    | no       |                                         | If specified and `upload-assets` is set to true, the provenance will be uploaded to a Github release identified by the tag-name regardless of the triggering event.                                                                                       |
+| `prerelease`         | no       |                                         | If specified and `upload-assets` is set to true, the release is created as prerelease.                                                                                                                                                                    |
 | `private-repository` | no       | false                                   | Set to true to opt-in to posting to the public transparency log. Will generate an error if false for private repositories. This input has no effect for public repositories. See [Private Repositories](#private-repositories).                           |
+| `draft-release`      | no       | false                                   | If true, the release is created as a draft                                                                                                                                                                                                                |
+
+### Workflow Outputs
+
+The builder workflow [slsa-framework/slsa-github-generator/.github/workflows/builder_go_slsa3.yml](https://github.com/slsa-framework/slsa-github-generator/blob/main/.github/workflows/builder_go_slsa3.yml) provides the following outputs:
+
+| Name                 | Description                                                                           |
+| -------------------- | ------------------------------------------------------------------------------------- |
+| `go-binary-name`     | The name of the generated binary uploaded to the artifact registry.                   |
+| `go-provenance-name` | The artifact name of the signed provenance. (A file with the intoto.jsonl extension). |
 
 ### Workflow Example
 
@@ -202,7 +251,7 @@ jobs:
       contents: write # To upload assets to release.
       actions: read # To read the workflow path.
     needs: args
-    uses: slsa-framework/slsa-github-generator/.github/workflows/builder_go_slsa3.yml@v1.4.0
+    uses: slsa-framework/slsa-github-generator/.github/workflows/builder_go_slsa3.yml@v2.0.0
     with:
       go-version: 1.17
       # Optional: only needed if using ldflags.
@@ -353,7 +402,7 @@ The `BuildConfig` contains the following fields:
 
 Workflows are currently failing with the error:
 
-```
+```text
 validating log entry: unable to fetch Rekor public keys from TUF repository, and not trusting the Rekor API for fetching public keys: updating local metadata and targets: error updating to TUF remote mirror: tuf: invalid key
 ```
 
@@ -371,5 +420,14 @@ the latest release. Make sure you continue to reference the workflow using a
 release tag in order to allow verification by `slsa-verifier`.
 
 ```yaml
-uses: slsa-framework/slsa-github-generator/.github/workflows/builder_go_slsa3.yml@v1.4.0
+uses: slsa-framework/slsa-github-generator/.github/workflows/builder_go_slsa3.yml@v2.0.0
 ```
+
+### Compatibility with `actions/download-artifact`
+
+To download provenance (e.g., if you don't use `upload-assets`) you have to
+use [`actions/download-artifact@v3`](https://github.com/actions/download-artifact).
+The workflow uses [`actions/upload-artifact@3`](https://github.com/actions/upload-artifact)
+which is
+[not compatible](https://github.com/actions/download-artifact?tab=readme-ov-file#breaking-changes)
+with `actions/download-artifact@v4`.

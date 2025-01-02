@@ -15,19 +15,21 @@
 package pkg
 
 import (
-	"fmt"
+	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	intoto "github.com/in-toto/in-toto-golang/in_toto"
 )
 
 func Test_CreateBuildDefinition(t *testing.T) {
 	config := &DockerBuildConfig{
-		SourceRepo:   "git+https://github.com/project-oak/transparent-release",
-		SourceDigest: Digest{Alg: "sha1", Value: "9b5f98310dbbad675834474fa68c37d880687cb9"},
+		SourceRepo:   "git+https://github.com/slsa-framework/slsa-github-generator@refs/heads/main",
+		SourceDigest: Digest{Alg: "sha1", Value: "cf5804b5c6f1a4b2a0b03401a487dfdfbe3a5f00"},
 		BuilderImage: DockerImage{
 			Name:   "bash",
 			Digest: Digest{Alg: "sha256", Value: "9e2ba52487d945504d250de186cb4fe2e3ba023ed2921dd6ac8b97ed43e76af9"},
@@ -35,7 +37,15 @@ func Test_CreateBuildDefinition(t *testing.T) {
 		BuildConfigPath: "internal/builders/docker/testdata/config.toml",
 	}
 
-	got := CreateBuildDefinition(config)
+	db := &DockerBuild{
+		config: config,
+		buildConfig: &BuildConfig{
+			Command:      []string{"cp", "internal/builders/docker/testdata/config.toml", "config.toml"},
+			ArtifactPath: "config.toml",
+		},
+	}
+
+	got := db.CreateBuildDefinition()
 
 	want, err := loadBuildDefinitionFromFile("../testdata/build-definition.json")
 	if err != nil {
@@ -43,7 +53,7 @@ func Test_CreateBuildDefinition(t *testing.T) {
 	}
 
 	if diff := cmp.Diff(got, want); diff != "" {
-		t.Errorf(diff)
+		t.Error(diff)
 	}
 }
 
@@ -54,17 +64,18 @@ func Test_GitClient_verifyOrFetchRepo(t *testing.T) {
 		// The digest value does not matter for the test
 		SourceDigest:    Digest{Alg: "sha1", Value: "does-not-matter"},
 		BuildConfigPath: "internal/builders/docker/testdata/config.toml",
+		ForceCheckout:   false,
 		// BuilderImage field is not relevant, so it is omitted
 	}
-	gc, err := newGitClient(config, false, 1)
+	gc, err := newGitClient(config, 1)
 	if err != nil {
 		t.Fatalf("Could create GitClient: %v", err)
 	}
 
-	// We expect it to fail at verify commit
-	want := "the repo is already checked out at a different commit"
-	err = gc.verifyOrFetchRepo()
-	checkError(t, err, want)
+	// We expect it to fail at verifyCommit
+	if got, want := gc.verifyOrFetchRepo(), errGitCommitMismatch; !errors.Is(got, want) {
+		t.Errorf("unexpected error: %v", cmp.Diff(got, want, cmpopts.EquateErrors()))
+	}
 }
 
 func Test_GitClient_fetchSourcesFromGitRepo(t *testing.T) {
@@ -81,17 +92,18 @@ func Test_GitClient_fetchSourcesFromGitRepo(t *testing.T) {
 		// The digest value does not matter for the test
 		SourceDigest:    Digest{Alg: "sha1", Value: "does-no-matter"},
 		BuildConfigPath: "internal/builders/docker/testdata/config.toml",
+		ForceCheckout:   false,
 		// BuilderImage field is not relevant, so it is omitted
 	}
-	gc, err := newGitClient(config, false, 1)
+	gc, err := newGitClient(config, 1)
 	if err != nil {
 		t.Fatalf("Could not create GitClient: %v", err)
 	}
 
 	// We expect the checkout to fail
-	want := "couldn't checkout the Git commit"
-	err = gc.fetchSourcesFromGitRepo()
-	checkError(t, err, want)
+	if got, want := gc.fetchSourcesFromGitRepo(), errGitCheckout; !errors.Is(got, want) {
+		t.Errorf("unexpected error: %v", cmp.Diff(got, want, cmpopts.EquateErrors()))
+	}
 
 	// Cleanup
 	gc.cleanupAllFiles()
@@ -101,27 +113,150 @@ func Test_GitClient_fetchSourcesFromGitRepo(t *testing.T) {
 	}
 }
 
+func Test_GitClient_sourceWithRef(t *testing.T) {
+	// This tests that specifying a source repository with a ref resolves
+	// to a valid GitClient source repository
+
+	config := &DockerBuildConfig{
+		// Use a small repo for test
+		SourceRepo: "git+https://github.com/project-oak/transparent-release@refs/heads/main",
+		// The digest value does not matter for the test
+		SourceDigest:    Digest{Alg: "sha1", Value: "does-no-matter"},
+		BuildConfigPath: "internal/builders/docker/testdata/config.toml",
+		ForceCheckout:   false,
+		// BuilderImage field is not relevant, so it is omitted
+	}
+	gc, err := newGitClient(config, 1)
+	if err != nil {
+		t.Fatalf("Could not create GitClient: %v", err)
+	}
+
+	// We expect that the sourceRef is set to refs/heads/main
+	if gc.sourceRef == nil || *gc.sourceRef != "refs/heads/main" {
+		t.Errorf("expected sourceRef to be refs/heads/main, got %s", *gc.sourceRef)
+	}
+}
+
+func Test_GitClient_invalidSourceRef(t *testing.T) {
+	// This tests that specifying a source repository with a ref resolves
+	// to a valid GitClient source repository
+
+	config := &DockerBuildConfig{
+		// Use a small repo for test
+		SourceRepo: "git+https://github.com/project-oak/transparent-release@refs/heads/main@invalid",
+		// The digest value does not matter for the test
+		SourceDigest:    Digest{Alg: "sha1", Value: "does-no-matter"},
+		BuildConfigPath: "internal/builders/docker/testdata/config.toml",
+		ForceCheckout:   false,
+		// BuilderImage field is not relevant, so it is omitted
+	}
+	_, err := newGitClient(config, 1)
+	if err == nil {
+		t.Fatalf("expected error creating GitClient")
+	}
+	if !strings.Contains(err.Error(), "invalid source repository format") {
+		t.Fatalf("expected invalid source ref error creating GitClient, got %s", err)
+	}
+}
+
 func Test_inspectArtifacts(t *testing.T) {
 	// Note: If the files in ../testdata/ change, this test must be updated.
-	pattern := "../testdata/*"
-	got, err := inspectArtifacts(pattern)
+	pattern := "testdata/*"
+	out := t.TempDir()
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Execute this function from docker/ instead of pkg/ so that the testdata
+	// folder is in the current dir.
+	t.Cleanup(func() {
+		if err := os.Chdir(wd); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err := os.Chdir(filepath.Dir(wd)); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := inspectAndWriteArtifacts(pattern, out, filepath.Dir(wd))
 	if err != nil {
 		t.Fatalf("failed to inspect artifacts: %v", err)
 	}
 
 	s1 := intoto.Subject{
 		Name:   "build-definition.json",
-		Digest: map[string]string{"sha256": "f139aef0c32000161fa71052276697fa8acbecaa2fd68f5c20f1a5ca95458e13"},
+		Digest: map[string]string{"sha256": "ab5582bfb6128c534583e1fea92421158c9de5e72e86c78cf550a8adcbf12db5"},
 	}
 	s2 := intoto.Subject{
 		Name:   "config.toml",
 		Digest: map[string]string{"sha256": "975a0582b8c9607f3f20a6b8cfef01b25823e68c5c3658e6e1ccaaced2a3255d"},
 	}
 
-	want := []intoto.Subject{s1, s2}
+	s3 := intoto.Subject{
+		Name:   "slsa1-provenance.json",
+		Digest: map[string]string{"sha256": "8b43bccfe6704594dcfbd8824097c16f61b79b32ec5439f4704cdf0b4529958b"},
+	}
+
+	s4 := intoto.Subject{
+		Name:   "wildcard-config.toml",
+		Digest: map[string]string{"sha256": "d9b8670f1b9616db95b0dc84cbc68062c691ef31bb9240d82753de0739c59194"},
+	}
+
+	want := []intoto.Subject{s1, s2, s3, s4}
 
 	if diff := cmp.Diff(got, want); diff != "" {
-		t.Errorf(diff)
+		t.Error(diff)
+	}
+}
+
+// When running in the checkout of the repository root, root == "".
+func Test_inspectArtifactsNoRoot(t *testing.T) {
+	// Note: If the files in ../testdata/ change, this test must be updated.
+	pattern := "testdata/*"
+	out := t.TempDir()
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(wd); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err := os.Chdir(".."); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := inspectAndWriteArtifacts(pattern, out, "")
+	if err != nil {
+		t.Fatalf("failed to inspect artifacts: %v", err)
+	}
+
+	s1 := intoto.Subject{
+		Name:   "build-definition.json",
+		Digest: map[string]string{"sha256": "ab5582bfb6128c534583e1fea92421158c9de5e72e86c78cf550a8adcbf12db5"},
+	}
+	s2 := intoto.Subject{
+		Name:   "config.toml",
+		Digest: map[string]string{"sha256": "975a0582b8c9607f3f20a6b8cfef01b25823e68c5c3658e6e1ccaaced2a3255d"},
+	}
+
+	s3 := intoto.Subject{
+		Name:   "slsa1-provenance.json",
+		Digest: map[string]string{"sha256": "8b43bccfe6704594dcfbd8824097c16f61b79b32ec5439f4704cdf0b4529958b"},
+	}
+
+	s4 := intoto.Subject{
+		Name:   "wildcard-config.toml",
+		Digest: map[string]string{"sha256": "d9b8670f1b9616db95b0dc84cbc68062c691ef31bb9240d82753de0739c59194"},
+	}
+
+	want := []intoto.Subject{s1, s2, s3, s4}
+
+	if diff := cmp.Diff(got, want); diff != "" {
+		t.Error(diff)
 	}
 }
 
@@ -132,14 +267,29 @@ func (testFetcher) Fetch() (*RepoCheckoutInfo, error) {
 }
 
 func Test_Builder_SetUpBuildState(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Execute this function from docker/ instead of pkg/ so that the testdata config
+	// is in the current dir.
+	t.Cleanup(func() {
+		if err := os.Chdir(wd); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err := os.Chdir(filepath.Dir(wd)); err != nil {
+		t.Fatal(err)
+	}
+
 	config := DockerBuildConfig{
 		SourceRepo:   "git+https://github.com/project-oak/transparent-release",
-		SourceDigest: Digest{Alg: "sha1", Value: "9b5f98310dbbad675834474fa68c37d880687cb9"},
+		SourceDigest: Digest{Alg: "sha1", Value: "cf5804b5c6f1a4b2a0b03401a487dfdfbe3a5f00"},
 		BuilderImage: DockerImage{
 			Name:   "bash",
 			Digest: Digest{Alg: "sha256", Value: "9e2ba52487d945504d250de186cb4fe2e3ba023ed2921dd6ac8b97ed43e76af9"},
 		},
-		BuildConfigPath: "../testdata/config.toml",
+		BuildConfigPath: "testdata/config.toml",
 	}
 
 	f := testFetcher{}
@@ -157,13 +307,57 @@ func Test_Builder_SetUpBuildState(t *testing.T) {
 	}
 }
 
-// TODO(#1478): Use custom error types, and check errors based on their type.
-func checkError(t *testing.T, err error, want string) {
-	if err == nil {
-		t.Errorf("expected error, got nil")
+func Test_ParseProvenance(t *testing.T) {
+	provenance := loadProvenance(t)
+	got := &provenance.Predicate.BuildDefinition
+
+	want, err := loadBuildDefinitionFromFile("../testdata/build-definition.json")
+	if err != nil {
+		t.Fatalf("%v", err)
 	}
-	got := fmt.Sprintf("%v", err)
-	if !strings.Contains(got, want) {
-		t.Errorf("unexpected error message: got (%q) does not contain want (%q)", got, want)
+
+	if diff := cmp.Diff(got, want); diff != "" {
+		t.Error(diff)
 	}
+}
+
+func Test_ProvenanceStatementSLSA1_ToDockerBuildConfig(t *testing.T) {
+	provenance := loadProvenance(t)
+	got, err := provenance.ToDockerBuildConfig(true)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+
+	want := &DockerBuildConfig{
+		SourceRepo: "git+https://github.com/slsa-framework/slsa-github-generator@refs/heads/main",
+		SourceDigest: Digest{
+			Alg:   "sha1",
+			Value: "cf5804b5c6f1a4b2a0b03401a487dfdfbe3a5f00",
+		},
+		BuilderImage: DockerImage{
+			Name: "bash",
+			Digest: Digest{
+				Alg:   "sha256",
+				Value: "9e2ba52487d945504d250de186cb4fe2e3ba023ed2921dd6ac8b97ed43e76af9",
+			},
+		},
+		BuildConfigPath: "internal/builders/docker/testdata/config.toml",
+		ForceCheckout:   true,
+	}
+	if diff := cmp.Diff(got, want); diff != "" {
+		t.Error(diff)
+	}
+}
+
+func loadProvenance(t *testing.T) ProvenanceStatementSLSA1 {
+	bytes, err := os.ReadFile("../testdata/slsa1-provenance.json")
+	if err != nil {
+		t.Fatalf("Reading the provenance file: %v", err)
+	}
+
+	provenance, err := ParseProvenance(bytes)
+	if err != nil {
+		t.Fatalf("Parsing the provenance file: %v", err)
+	}
+	return *provenance
 }

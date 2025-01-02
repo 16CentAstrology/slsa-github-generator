@@ -35,12 +35,13 @@ func rootCmd() *cobra.Command {
 		Short: "Generate SLSA provenance for artifacts built using a docker builder image",
 		Long: `Generate SLSA provenance for artifacts built using a docker builder image.
 For more information on SLSA, visit https://slsa.dev`,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			return errors.New("expecting a command")
 		},
 	}
 	cmd.AddCommand(DryRunCmd(checkExit))
 	cmd.AddCommand(BuildCmd(checkExit))
+	cmd.AddCommand(VerifyCmd(checkExit))
 	return cmd
 }
 

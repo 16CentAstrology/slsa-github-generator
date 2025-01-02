@@ -26,15 +26,6 @@ import (
 	"github.com/slsa-framework/slsa-github-generator/internal/utils"
 )
 
-var (
-	// ErrorInvalidEnvironmentVariable is an invalid environment variable.
-	ErrorInvalidEnvironmentVariable = errors.New("invalid environment variable")
-	// ErrorUnsupportedVersion is non-supported version.
-	ErrorUnsupportedVersion = errors.New("version not supported")
-	// ErrorInvalidDirectory is an invalid directory.
-	ErrorInvalidDirectory = errors.New("invalid directory")
-)
-
 var supportedVersions = map[int]bool{
 	1: true,
 }
@@ -63,6 +54,17 @@ type GoReleaserConfig struct {
 	Ldflags []string
 }
 
+var (
+	// ErrUnsupportedVersion indicates an unsupported Go builder version.
+	ErrUnsupportedVersion = errors.New("unsupported version")
+
+	// ErrInvalidDirectory indicates an invalid directory.
+	ErrInvalidDirectory = errors.New("invalid directory")
+
+	// ErrInvalidEnvironmentVariable indicates  an invalid environment variable.
+	ErrInvalidEnvironmentVariable = errors.New("invalid environment variable")
+)
+
 func configFromString(b []byte) (*GoReleaserConfig, error) {
 	var cf goReleaserConfigFile
 	if err := yaml.Unmarshal(b, &cf); err != nil {
@@ -76,7 +78,7 @@ func configFromString(b []byte) (*GoReleaserConfig, error) {
 // from it.
 func ConfigFromFile(path string) (*GoReleaserConfig, error) {
 	if err := validatePath(path); err != nil {
-		return nil, fmt.Errorf("%q: %w", path, err)
+		return nil, fmt.Errorf("validate path: %q: %w", path, err)
 	}
 
 	cfg, err := os.ReadFile(filepath.Clean(path))
@@ -86,7 +88,7 @@ func ConfigFromFile(path string) (*GoReleaserConfig, error) {
 
 	c, err := configFromString(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("%q: %w", path, err)
+		return nil, fmt.Errorf("configfromstring: %q: %w", path, err)
 	}
 	return c, nil
 }
@@ -149,13 +151,10 @@ func validateMain(cf *goReleaserConfigFile) error {
 }
 
 func convertPathError(e error, msg string) error {
-	// TODO(https://github.com/slsa-framework/slsa-github-generator/issues/599): use same error types.
 	if e != nil {
-		var errInternal *utils.ErrInternal
-		var errPath *utils.ErrInvalidPath
-		if errors.As(e, &errInternal) ||
-			errors.As(e, &errPath) {
-			return ErrorInvalidDirectory
+		if errors.Is(e, utils.ErrInternal) ||
+			errors.Is(e, utils.ErrInvalidPath) {
+			return fmt.Errorf("%w: %v", ErrInvalidDirectory, e)
 		}
 		return fmt.Errorf("%s: %w", msg, e)
 	}
@@ -165,7 +164,7 @@ func convertPathError(e error, msg string) error {
 func validateVersion(cf *goReleaserConfigFile) error {
 	_, exists := supportedVersions[cf.Version]
 	if !exists {
-		return fmt.Errorf("%w: %d", ErrorUnsupportedVersion, cf.Version)
+		return fmt.Errorf("%w: '%d'", ErrUnsupportedVersion, cf.Version)
 	}
 
 	return nil
@@ -176,7 +175,7 @@ func (r *GoReleaserConfig) setEnvs(cf *goReleaserConfigFile) error {
 	for _, e := range cf.Env {
 		name, value, present := strings.Cut(e, "=")
 		if !present {
-			return fmt.Errorf("%w: %s", ErrorInvalidEnvironmentVariable, e)
+			return fmt.Errorf("%w: '%s' contains no '='", ErrInvalidEnvironmentVariable, e)
 		}
 		m[name] = value
 	}

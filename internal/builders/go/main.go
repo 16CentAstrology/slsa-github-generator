@@ -15,6 +15,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"flag"
@@ -22,13 +23,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 
 	"github.com/slsa-framework/slsa-github-generator/github"
 	"github.com/slsa-framework/slsa-github-generator/signing/sigstore"
 
 	// Enable the GitHub OIDC auth provider.
-	_ "github.com/sigstore/cosign/pkg/providers/github"
+	_ "github.com/sigstore/cosign/v2/pkg/providers/github"
 
 	"github.com/slsa-framework/slsa-github-generator/internal/builders/go/pkg"
 	"github.com/slsa-framework/slsa-github-generator/internal/utils"
@@ -94,20 +94,16 @@ func runProvenanceGeneration(subject, digest, commands, envs, workingDir, rekor 
 		return err
 	}
 
-	if err = github.SetOutput("signed-provenance-name", filename); err != nil {
+	if err := github.SetOutput("signed-provenance-name", filename); err != nil {
 		return err
 	}
 
-	h, err := computeSHA256(filename)
+	h, err := computeSHA256(attBytes)
 	if err != nil {
 		return err
 	}
 
-	if err = github.SetOutput("signed-provenance-sha256", h); err != nil {
-		return err
-	}
-
-	return nil
+	return github.SetOutput("signed-provenance-sha256", h)
 }
 
 func main() {
@@ -158,16 +154,9 @@ func main() {
 	}
 }
 
-func computeSHA256(filePath string) (string, error) {
-	file, err := os.Open(filepath.Clean(filePath))
-	if err != nil {
-		return "", err
-	}
-
-	defer file.Close()
-
+func computeSHA256(data []byte) (string, error) {
 	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
+	if _, err := io.Copy(hash, bytes.NewReader(data)); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil

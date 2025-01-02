@@ -1,3 +1,17 @@
+// Copyright 2023 SLSA Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package main
 
 import (
@@ -16,10 +30,6 @@ import (
 	"github.com/slsa-framework/slsa-github-generator/internal/utils"
 )
 
-func errCmp(e1, e2 error) bool {
-	return errors.Is(e1, e2) || errors.Is(e2, e1)
-}
-
 func checkWorkingDir(t *testing.T, wd, expected string) {
 	var expectedWd string
 	var err error
@@ -36,20 +46,39 @@ func checkWorkingDir(t *testing.T, wd, expected string) {
 	}
 
 	if expectedWd != wd {
-		t.Errorf(cmp.Diff(wd, expectedWd))
+		t.Error(cmp.Diff(wd, expectedWd))
+	}
+}
+
+func errInvalidDirectoryFunc(t *testing.T, got error) {
+	want := pkg.ErrInvalidDirectory
+	if !errors.Is(got, want) {
+		t.Fatalf("unexpected error: %v", cmp.Diff(got, want, cmpopts.EquateErrors()))
+	}
+}
+
+func errUnsupportedVersionFunc(t *testing.T, got error) {
+	want := pkg.ErrUnsupportedVersion
+	if !errors.Is(got, want) {
+		t.Fatalf("unexpected error: %v", cmp.Diff(got, want, cmpopts.EquateErrors()))
+	}
+}
+
+func errInvalidEnvironmentVariableFunc(t *testing.T, got error) {
+	want := pkg.ErrInvalidEnvironmentVariable
+	if !errors.Is(got, want) {
+		t.Fatalf("unexpected error: %v", cmp.Diff(got, want, cmpopts.EquateErrors()))
 	}
 }
 
 func Test_runBuild(t *testing.T) {
-	t.Parallel()
-
 	tests := []struct {
 		subject    string
 		name       string
 		config     string
 		evalEnvs   string
 		workingDir string
-		err        error
+		err        func(*testing.T, error)
 		commands   []string
 		envs       []string
 	}{
@@ -236,43 +265,41 @@ func Test_runBuild(t *testing.T) {
 			},
 			workingDir: "./valid/path/",
 		},
-		// Below are the same tests we do in pkg/config_test.go
 		{
 			name:   "invalid main",
 			config: "./pkg/testdata/releaser-invalid-main.yml",
-			err:    pkg.ErrorInvalidDirectory,
+			err:    errInvalidDirectoryFunc,
 		},
 		{
 			name:   "missing version",
 			config: "./pkg/testdata/releaser-noversion.yml",
-			err:    pkg.ErrorUnsupportedVersion,
+			err:    errUnsupportedVersionFunc,
 		},
 		{
 			name:   "invalid version",
 			config: "./pkg/testdata/releaser-invalid-version.yml",
-			err:    pkg.ErrorUnsupportedVersion,
+			err:    errUnsupportedVersionFunc,
 		},
 		{
 			name:   "invalid envs",
 			config: "./pkg/testdata/releaser-invalid-envs.yml",
-			err:    pkg.ErrorInvalidEnvironmentVariable,
+			err:    errInvalidEnvironmentVariableFunc,
 		},
 		{
 			name:   "invalid path",
 			config: "../pkg/testdata/releaser-invalid-main.yml",
-			err:    pkg.ErrorInvalidDirectory,
+			err:    errInvalidDirectoryFunc,
 		},
 		{
 			name:   "invalid dir path",
 			config: "../pkg/testdata/releaser-invalid-dir.yml",
-			err:    pkg.ErrorInvalidDirectory,
+			err:    errInvalidDirectoryFunc,
 		},
 	}
 
 	for _, tt := range tests {
-		tt := tt // Re-initializing variable so it is not changed while executing the closure below
 		t.Run(tt.name, func(t *testing.T) {
-			// *** WARNING: do not enable t.Parallel(), because we're writing to  ***.
+			// *** WARNING: do not enable t.Parallel(), because we're writing to environment variables ***.
 			file, err := os.CreateTemp("", "")
 			if err != nil {
 				t.Fatalf("unable to create a temp env file: %s", err)
@@ -286,8 +313,8 @@ func Test_runBuild(t *testing.T) {
 				tt.config,
 				tt.evalEnvs)
 
-			if !errCmp(err, tt.err) {
-				t.Errorf(cmp.Diff(err, tt.err, cmpopts.EquateErrors()))
+			if tt.err != nil {
+				tt.err(t, err)
 			}
 
 			if err != nil {
@@ -308,19 +335,19 @@ func Test_runBuild(t *testing.T) {
 			}
 
 			if !cmp.Equal(subject, tt.subject) {
-				t.Errorf(cmp.Diff(subject, tt.subject))
+				t.Error(cmp.Diff(subject, tt.subject))
 			}
 
 			commands := append([]string{goc, "build", "-mod=vendor"}, tt.commands...)
 			if !cmp.Equal(cmd, commands) {
-				t.Errorf(cmp.Diff(cmd, commands))
+				t.Error(cmp.Diff(cmd, commands))
 			}
 
 			checkWorkingDir(t, wd, tt.workingDir)
 
 			sorted := cmpopts.SortSlices(func(a, b string) bool { return a < b })
 			if !cmp.Equal(env, tt.envs, sorted) {
-				t.Errorf(cmp.Diff(env, tt.envs))
+				t.Error(cmp.Diff(env, tt.envs))
 			}
 		})
 	}

@@ -16,11 +16,11 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/slsa-framework/slsa-github-generator/internal/errors"
 	"github.com/slsa-framework/slsa-github-generator/internal/utils"
 	"github.com/slsa-framework/slsa-github-generator/slsa"
 )
@@ -35,6 +35,7 @@ func checkTest(t *testing.T) func(err error) {
 
 func Test_generateCmd_default_predicate(t *testing.T) {
 	t.Setenv("GITHUB_CONTEXT", "{}")
+	t.Setenv("VARS_CONTEXT", "{}")
 
 	// Change to temporary dir
 	currentDir, err := os.Getwd()
@@ -69,6 +70,7 @@ func Test_generateCmd_default_predicate(t *testing.T) {
 
 func Test_generateCmd_custom_predicate(t *testing.T) {
 	t.Setenv("GITHUB_CONTEXT", "{}")
+	t.Setenv("VARS_CONTEXT", "{}")
 
 	// Change to temporary dir
 	currentDir, err := os.Getwd()
@@ -104,6 +106,7 @@ func Test_generateCmd_custom_predicate(t *testing.T) {
 
 func Test_generateCmd_invalid_path(t *testing.T) {
 	t.Setenv("GITHUB_CONTEXT", "{}")
+	t.Setenv("VARS_CONTEXT", "{}")
 
 	// Change to temporary dir
 	currentDir, err := os.Getwd()
@@ -127,9 +130,9 @@ func Test_generateCmd_invalid_path(t *testing.T) {
 	// A custom check function that checks the error type is the expected error type.
 	check := func(err error) {
 		if err != nil {
-			errInvalidPath := &utils.ErrInvalidPath{}
-			if !errors.As(err, &errInvalidPath) {
-				t.Fatalf("expected %v but got %v", &utils.ErrInvalidPath{}, err)
+			got, want := err, utils.ErrInvalidPath
+			if !errors.Is(got, want) {
+				t.Fatalf("unexpected error, got: %v, want %v", got, want)
 			}
 			// Check should exit the program so we skip the rest of the test if we got the expected error.
 			t.SkipNow()

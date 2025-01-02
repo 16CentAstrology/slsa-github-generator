@@ -37,35 +37,34 @@ func generateCmd(provider slsa.ClientProvider, check func(error)) *cobra.Command
 		Long: `Generate SLSA provenance predicate from a GitHub Action. This command assumes
 that it is being run in the context of a Github Actions workflow.`,
 
-		Run: func(cmd *cobra.Command, args []string) {
+		Run: func(_ *cobra.Command, _ []string) {
 			ghContext, err := github.GetWorkflowContext()
+			check(err)
+
+			varsContext, err := github.GetVarsContext()
 			check(err)
 
 			ctx := context.Background()
 
 			b := common.GenericBuild{
 				// NOTE: Subjects are nil because we are only writing the predicate.
-				GithubActionsBuild: slsa.NewGithubActionsBuild(nil, ghContext),
+				GithubActionsBuild: slsa.NewGithubActionsBuild(nil, &ghContext, varsContext),
 				BuildTypeURI:       containerBuildType,
 			}
 
 			if provider != nil {
 				b.WithClients(provider)
-			} else {
+			} else if utils.IsPresubmitTests() {
 				// TODO(github.com/slsa-framework/slsa-github-generator/issues/124): Remove
-				if utils.IsPresubmitTests() {
-					b.WithClients(&slsa.NilClientProvider{})
-				}
+				b.WithClients(&slsa.NilClientProvider{})
 			}
 
 			g := slsa.NewHostedActionsGenerator(&b)
 			if provider != nil {
 				g.WithClients(provider)
-			} else {
+			} else if utils.IsPresubmitTests() {
 				// TODO(github.com/slsa-framework/slsa-github-generator/issues/124): Remove
-				if utils.IsPresubmitTests() {
-					g.WithClients(&slsa.NilClientProvider{})
-				}
+				g.WithClients(&slsa.NilClientProvider{})
 			}
 
 			p, err := g.Generate(ctx)
